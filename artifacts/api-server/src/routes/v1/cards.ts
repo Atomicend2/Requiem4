@@ -122,6 +122,7 @@ router.get("/from-json", (req, res) => {
         description: "",
         imageUrl,
         isAnimated,
+        isVideo: !!c.has_webm,   // true only for actual webm — <video> tag; false = GIF → <img> tag
         totalCopies: 0,
         owners: [],
         ownerName: "Unclaimed",

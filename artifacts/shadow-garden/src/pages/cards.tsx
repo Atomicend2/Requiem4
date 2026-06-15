@@ -289,7 +289,7 @@ function CardDisplay({ card, showOwned }: { card: any; showOwned?: boolean }) {
         {/* Card Image */}
         <div className={cn("relative w-full aspect-[3/4] overflow-hidden", cfg.bg)}>
           {hasImage ? (
-            card.isAnimated ? (
+            card.isVideo ? (
               <video
                 key={card.imageUrl}
                 src={card.imageUrl}
