@@ -1,0 +1,40 @@
+services:
+  - type: web
+    name: requiem-order
+    env: node
+    region: oregon
+    plan: free
+    buildCommand: >-
+      pnpm install &&
+      PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/.playwright node_modules/.bin/playwright install chromium --with-deps &&
+      pnpm --filter @workspace/shadow-garden run build &&
+      node artifacts/api-server/build.mjs
+    startCommand: PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/.playwright node --enable-source-maps artifacts/api-server/dist/index.mjs
+    healthCheckPath: /api/healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: BOT_PHONE_NUMBER
+        sync: false
+      - key: BOT_OWNER_PHONE
+        sync: false
+      - key: OWNER_NUMBERS
+        sync: false
+      - key: BOT_OWNER_LID
+        sync: false
+      - key: WEBSITE_URL
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: DATA_DIR
+        value: /data
+    disk:
+      name: requiem-order-data
+      mountPath: /data
+      sizeGB: 1
