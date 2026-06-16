@@ -692,7 +692,7 @@ function AdminDashboard({ token, base, onLogout, toast }: {
               <Bot className="w-5 h-5 text-teal-400" /> Registered Bots ({bots.length}/5)
             </h2>
             <p className="text-xs text-muted-foreground mb-4 -mt-2">
-              Each linked WhatsApp number is its own bot with its own AI companion personality. Assign a persona below — Echidna, C.C., Zero, or others — independently per bot.
+              Each linked WhatsApp number is its own bot with its own AI companion personality. Assign a persona below — Echidna or Euphemia — independently per bot.
             </p>
             {bots.length === 0 ? (
               <div className="py-12 text-center text-muted-foreground">No bots registered yet. Add one above.</div>
@@ -805,7 +805,7 @@ function AdminDashboard({ token, base, onLogout, toast }: {
                             disabled={actionPending}
                             className="bg-black/40 border border-rose-400/30 rounded text-rose-300 text-xs font-bold px-2 py-1 focus:outline-none focus:border-rose-400/60"
                           >
-                            {(personas.length ? personas : [{ key: "echidna", shortLabel: "Echidna", displayName: "Echidna" }]).map((p) => (
+                            {(personas.length ? personas : [{ key: "echidna", shortLabel: "Echidna", displayName: "Echidna" }, { key: "euphemia", shortLabel: "Euphemia", displayName: "Euphemia li Britannia" }]).map((p) => (
                               <option key={p.key} value={p.key} className="bg-black text-white">{p.shortLabel}</option>
                             ))}
                           </select>

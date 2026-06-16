@@ -13,7 +13,7 @@
  *  Activation rules:
  *    • Bot is mentioned (@tag)  → always responds
  *    • Message is a reply to a bot message → responds
- *    • Persona's name is mentioned (e.g. "echidna", "C.C.", "zero")  → responds
+ *    • Persona's name is mentioned (e.g. "echidna", "euphemia", "euphie")  → responds
  *    • Group has echidna_chat = "on" → responds to every message
  *    • Direct message → always responds
  *

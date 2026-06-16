@@ -319,7 +319,7 @@ export async function handleMessage(
     }
 
     // ── AI companion activation check ────────────────────────────────────────
-    // The active persona (Echidna, C.C., Zero, etc. — see personas.ts) responds
+    // The active persona (Echidna, Euphemia, etc. — see personas.ts) responds
     // to: @mentions (by JID or LID), replies to bot, persona name mention,
     // DMs, or when echidna_chat is enabled for the group.
     if (body.trim().length > 0) {
