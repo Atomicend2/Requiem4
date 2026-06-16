@@ -186,26 +186,61 @@ router.get("/media-proxy", (req, res) => {
     res.status(400).send("Invalid url"); return;
   }
 
-  // Only allow Shoob CDN — never proxy arbitrary URLs
   if (!target.hostname.endsWith("shoob.gg")) {
     res.status(403).send("Forbidden"); return;
   }
 
-  const lib = target.protocol === "https:" ? https : http;
-  const upstream = lib.get(target.toString(), { headers: { "User-Agent": "Mozilla/5.0" } }, (upstream) => {
-    const ct = upstream.headers["content-type"] || "application/octet-stream";
-    const cl = upstream.headers["content-length"];
-    res.setHeader("Content-Type", ct);
-    res.setHeader("Cache-Control", "public, max-age=86400");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    if (cl) res.setHeader("Content-Length", cl);
-    res.status(upstream.statusCode || 200);
-    upstream.pipe(res);
-  });
-  upstream.on("error", (err) => {
-    logger.error({ err }, "media-proxy upstream error");
-    if (!res.headersSent) res.status(502).send("Upstream error");
-  });
+  // Follow up to 5 redirects so Shoob CDN redirect chains don't silently fail
+  function fetchWithRedirects(url: URL, redirectsLeft: number) {
+    const lib = url.protocol === "https:" ? https : http;
+    const req2 = lib.get(url.toString(), {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://shoob.gg/",
+      },
+    }, (upstream) => {
+      const status = upstream.statusCode || 200;
+
+      // Follow redirect
+      if ((status === 301 || status === 302 || status === 303 || status === 307 || status === 308)
+          && upstream.headers.location && redirectsLeft > 0) {
+        upstream.resume(); // drain the body
+        let nextUrl: URL;
+        try { nextUrl = new URL(upstream.headers.location, url.toString()); } catch {
+          if (!res.headersSent) res.status(502).send("Bad redirect");
+          return;
+        }
+        // Only follow redirects within shoob.gg for safety
+        if (!nextUrl.hostname.endsWith("shoob.gg") && !nextUrl.hostname.endsWith("cdn.shoob.gg")) {
+          // Non-shoob redirect — pipe the original response as-is
+          if (!res.headersSent) res.status(502).send("Redirect outside shoob");
+          return;
+        }
+        fetchWithRedirects(nextUrl, redirectsLeft - 1);
+        return;
+      }
+
+      const ct = upstream.headers["content-type"] || "application/octet-stream";
+      const cl = upstream.headers["content-length"];
+      res.setHeader("Content-Type", ct);
+      res.setHeader("Cache-Control", "public, max-age=86400");
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+      if (cl) res.setHeader("Content-Length", cl);
+      res.status(status);
+      upstream.pipe(res);
+    });
+    req2.on("error", (err) => {
+      logger.error({ err }, "media-proxy upstream error");
+      if (!res.headersSent) res.status(502).send("Upstream error");
+    });
+    req2.setTimeout(15000, () => {
+      req2.destroy();
+      if (!res.headersSent) res.status(504).send("Upstream timeout");
+    });
+  }
+
+  fetchWithRedirects(target, 5);
 });
 
 // Serve card media BLOB from the database (image or video for animated tiers)

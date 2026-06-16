@@ -261,6 +261,8 @@ function CardDisplay({ card, showOwned }: { card: any; showOwned?: boolean }) {
   const { toast } = useToast();
   const { isAuthenticated } = useAuth();
   const cfg = TIER_CONFIG[card.tier] || TIER_CONFIG["T1"];
+  const [imgLoaded, setImgLoaded] = useState(false);
+  const [imgError, setImgError] = useState(false);
 
   const wishlistMutation = useAddCardToWishlist({
     mutation: {
@@ -288,9 +290,15 @@ function CardDisplay({ card, showOwned }: { card: any; showOwned?: boolean }) {
       )}>
         {/* Card Image */}
         <div className={cn("relative w-full aspect-[3/4] overflow-hidden", cfg.bg)}>
-          {hasImage ? (
+          {/* Loading skeleton — shows while image/video is fetching */}
+          {hasImage && !imgLoaded && !imgError && (
+            <div className="absolute inset-0 animate-pulse bg-white/5 flex items-center justify-center">
+              <div className="w-8 h-8 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
+            </div>
+          )}
+
+          {hasImage && !imgError ? (
             card.isVideo ? (
-              // Webm animated card — URL is proxied through our API to satisfy CORS
               <video
                 key={card.imageUrl}
                 src={card.imageUrl}
@@ -298,20 +306,28 @@ function CardDisplay({ card, showOwned }: { card: any; showOwned?: boolean }) {
                 loop
                 muted
                 playsInline
-                crossOrigin="anonymous"
-                className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
+                onCanPlay={() => setImgLoaded(true)}
+                onError={() => { setImgError(true); setImgLoaded(true); }}
+                className={cn(
+                  "w-full h-full object-cover transition-all duration-500 group-hover:scale-105",
+                  imgLoaded ? "opacity-100" : "opacity-0"
+                )}
               />
             ) : (
-              // Static image OR GIF animated card (is_animated=true but no webm).
-              // GIFs autoplay in <img> tags natively — no extra handling needed.
               <img
                 src={card.imageUrl}
                 alt={card.name}
-                className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
+                loading="lazy"
+                onLoad={() => setImgLoaded(true)}
+                onError={() => { setImgError(true); setImgLoaded(true); }}
+                className={cn(
+                  "w-full h-full object-cover transition-all duration-500 group-hover:scale-105",
+                  imgLoaded ? "opacity-100" : "opacity-0"
+                )}
               />
             )
           ) : (
-            <div className="w-full h-full flex flex-col items-center justify-center gap-2 opacity-40">
+            <div className="absolute inset-0 w-full h-full flex flex-col items-center justify-center gap-2 opacity-40">
               <ImageOff className="w-8 h-8" />
               <span className="text-xs font-mono">No Image</span>
             </div>
