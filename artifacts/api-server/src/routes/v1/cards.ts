@@ -117,12 +117,10 @@ router.get("/from-json", (req, res) => {
             : `https://api.shoob.gg/site/api/cardr/${c.shoob_id}?size=400`)
           : "");
 
-      // Webm videos MUST go through our proxy so the browser can load them —
-      // Shoob doesn't send CORS headers, so <video> tags are blocked by browsers.
-      // GIF/image cards (no webm) load fine directly in <img> tags without CORS.
-      const imageUrl = (hasWebm && rawUrl)
-        ? `/api/v1/cards/media-proxy?url=${encodeURIComponent(rawUrl)}`
-        : rawUrl;
+      // Shoob serves GIFs for ALL animated cards — even ?type=webm URLs return GIFs.
+      // Use the URL directly in an <img> tag. GIFs animate automatically.
+      // Never proxy: Render datacenter IPs may be blocked by Shoob.
+      const imageUrl = rawUrl;
 
       return {
         id: c.shoob_id || c.id || "",
@@ -133,7 +131,7 @@ router.get("/from-json", (req, res) => {
         description: "",
         imageUrl,
         isAnimated,
-        isVideo: hasWebm,   // true = actual webm → use <video>; false = GIF/img → use <img>
+        isVideo: false,  // always false — use <img> for all cards, GIFs animate natively
         totalCopies: 0,
         owners: [],
         ownerName: "Unclaimed",

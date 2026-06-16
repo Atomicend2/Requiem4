@@ -298,34 +298,19 @@ function CardDisplay({ card, showOwned }: { card: any; showOwned?: boolean }) {
           )}
 
           {hasImage && !imgError ? (
-            card.isVideo ? (
-              <video
-                key={card.imageUrl}
-                src={card.imageUrl}
-                autoPlay
-                loop
-                muted
-                playsInline
-                onCanPlay={() => setImgLoaded(true)}
-                onError={() => { setImgError(true); setImgLoaded(true); }}
-                className={cn(
-                  "w-full h-full object-cover transition-all duration-500 group-hover:scale-105",
-                  imgLoaded ? "opacity-100" : "opacity-0"
-                )}
-              />
-            ) : (
-              <img
-                src={card.imageUrl}
-                alt={card.name}
-                loading="lazy"
-                onLoad={() => setImgLoaded(true)}
-                onError={() => { setImgError(true); setImgLoaded(true); }}
-                className={cn(
-                  "w-full h-full object-cover transition-all duration-500 group-hover:scale-105",
-                  imgLoaded ? "opacity-100" : "opacity-0"
-                )}
-              />
-            )
+            // All cards — static and animated — use <img>.
+            // Shoob serves GIFs (not real webm) so <img> animates them automatically.
+            <img
+              src={card.imageUrl}
+              alt={card.name}
+              loading="lazy"
+              onLoad={() => setImgLoaded(true)}
+              onError={() => { setImgError(true); setImgLoaded(true); }}
+              className={cn(
+                "w-full h-full object-cover transition-all duration-500 group-hover:scale-105",
+                imgLoaded ? "opacity-100" : "opacity-0"
+              )}
+            />
           ) : (
             <div className="absolute inset-0 w-full h-full flex flex-col items-center justify-center gap-2 opacity-40">
               <ImageOff className="w-8 h-8" />
