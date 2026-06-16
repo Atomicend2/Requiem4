@@ -290,6 +290,7 @@ function CardDisplay({ card, showOwned }: { card: any; showOwned?: boolean }) {
         <div className={cn("relative w-full aspect-[3/4] overflow-hidden", cfg.bg)}>
           {hasImage ? (
             card.isVideo ? (
+              // Webm animated card — URL is proxied through our API to satisfy CORS
               <video
                 key={card.imageUrl}
                 src={card.imageUrl}
@@ -297,9 +298,12 @@ function CardDisplay({ card, showOwned }: { card: any; showOwned?: boolean }) {
                 loop
                 muted
                 playsInline
+                crossOrigin="anonymous"
                 className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
               />
             ) : (
+              // Static image OR GIF animated card (is_animated=true but no webm).
+              // GIFs autoplay in <img> tags natively — no extra handling needed.
               <img
                 src={card.imageUrl}
                 alt={card.name}

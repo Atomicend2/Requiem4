@@ -2,6 +2,8 @@ import { Router } from "express";
 import multer from "multer";
 import fs from "fs";
 import path from "path";
+import https from "https";
+import http from "http";
 import { fileURLToPath } from "url";
 import { requireAuth, optionalAuth, type AuthRequest } from "./middleware.js";
 import { getDb } from "../../bot/db/database.js";
@@ -105,13 +107,22 @@ router.get("/from-json", (req, res) => {
 
     const result = paginated.map((c: any) => {
       const isAnimated = ANIMATED_TIERS.has(c.tier) || c.is_animated === true || c.is_animated === 1;
-      // media_url is directly on the card in cards.json
-      const imageUrl = c.media_url ||
+      const hasWebm = !!c.has_webm;
+
+      // Direct Shoob CDN URL for the media
+      const rawUrl = c.media_url ||
         (c.shoob_id
-          ? (c.has_webm
+          ? (hasWebm
             ? `https://api.shoob.gg/site/api/cardr/${c.shoob_id}?type=webm`
             : `https://api.shoob.gg/site/api/cardr/${c.shoob_id}?size=400`)
           : "");
+
+      // Webm videos MUST go through our proxy so the browser can load them —
+      // Shoob doesn't send CORS headers, so <video> tags are blocked by browsers.
+      // GIF/image cards (no webm) load fine directly in <img> tags without CORS.
+      const imageUrl = (hasWebm && rawUrl)
+        ? `/api/v1/cards/media-proxy?url=${encodeURIComponent(rawUrl)}`
+        : rawUrl;
 
       return {
         id: c.shoob_id || c.id || "",
@@ -122,7 +133,7 @@ router.get("/from-json", (req, res) => {
         description: "",
         imageUrl,
         isAnimated,
-        isVideo: !!c.has_webm,   // true only for actual webm — <video> tag; false = GIF → <img> tag
+        isVideo: hasWebm,   // true = actual webm → use <video>; false = GIF/img → use <img>
         totalCopies: 0,
         owners: [],
         ownerName: "Unclaimed",
@@ -158,6 +169,43 @@ router.post("/reload-from-json", requireAuth, async (req: AuthRequest, res) => {
     logger.error({ err }, "reload-from-json error");
     res.status(500).json({ success: false, message: err?.message || "Reload failed" });
   }
+});
+
+
+// ── Media proxy — pipes Shoob CDN media through our server so browser CORS is satisfied ──
+// GET /api/v1/cards/media-proxy?url=ENCODED_URL
+// Without this, browsers block <video> tags pointing at api.shoob.gg because Shoob
+// does not send Access-Control-Allow-Origin headers on video responses.
+// Only proxies URLs from api.shoob.gg for security.
+router.get("/media-proxy", (req, res) => {
+  const raw = req.query.url as string;
+  if (!raw) { res.status(400).send("Missing url"); return; }
+
+  let target: URL;
+  try { target = new URL(decodeURIComponent(raw)); } catch {
+    res.status(400).send("Invalid url"); return;
+  }
+
+  // Only allow Shoob CDN — never proxy arbitrary URLs
+  if (!target.hostname.endsWith("shoob.gg")) {
+    res.status(403).send("Forbidden"); return;
+  }
+
+  const lib = target.protocol === "https:" ? https : http;
+  const upstream = lib.get(target.toString(), { headers: { "User-Agent": "Mozilla/5.0" } }, (upstream) => {
+    const ct = upstream.headers["content-type"] || "application/octet-stream";
+    const cl = upstream.headers["content-length"];
+    res.setHeader("Content-Type", ct);
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    if (cl) res.setHeader("Content-Length", cl);
+    res.status(upstream.statusCode || 200);
+    upstream.pipe(res);
+  });
+  upstream.on("error", (err) => {
+    logger.error({ err }, "media-proxy upstream error");
+    if (!res.headersSent) res.status(502).send("Upstream error");
+  });
 });
 
 // Serve card media BLOB from the database (image or video for animated tiers)
