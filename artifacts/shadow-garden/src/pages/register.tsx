@@ -132,7 +132,7 @@ export default function Register() {
                   <Label htmlFor="name" className="text-primary tracking-[0.2em] uppercase text-xs">Display Name</Label>
                   <Input
                     id="name"
-                    placeholder="e.g. Natsuki"
+                    placeholder="e.g. Lelouch"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
                     className="bg-black/50 border-primary/30 text-white placeholder:text-muted-foreground focus-visible:ring-primary focus-visible:border-primary"
