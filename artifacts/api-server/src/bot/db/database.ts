@@ -8,6 +8,7 @@ import fs from "fs";
 const DB_DIR = process.env.DATA_DIR
   ? path.resolve(process.env.DATA_DIR)
   : path.join(process.cwd(), "data");
+export { DB_DIR };
 
 if (!fs.existsSync(DB_DIR)) {
   fs.mkdirSync(DB_DIR, { recursive: true });
@@ -550,6 +551,7 @@ function initSchema(db: Database.Database): void {
   ensureColumn(db, "users", "frame_id", "INTEGER DEFAULT NULL");
   ensureColumn(db, "users", "display_id", "TEXT");
   ensureColumn(db, "user_cards", "copy_id", "TEXT");
+  ensureColumn(db, "users", "owner_greeted", "INTEGER DEFAULT 0");
 
   // Rename "Rename Sheet📃" → "Rename Sheet" in shop and existing inventories
   db.prepare("UPDATE shop_items SET name = 'Rename Sheet' WHERE name = 'Rename Sheet📃'").run();

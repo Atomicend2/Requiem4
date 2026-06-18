@@ -486,7 +486,7 @@ export async function handleCardLogs(ctx: CommandContext): Promise<void> {
     );
   }).join("\n");
 
-  const header = `┌─❖\n│「 🆃🅴🅽🅺🆄 」\n└┬❖ 「 📊 𝗖𝗮𝗿𝗱 𝗦𝘆𝗻𝗰 𝗟𝗼𝗴𝘀 」\n`;
+  const header = `┌─❖\n│「 𝗥𝗘𝗤𝗨𝗜𝗘𝗠 」\n└┬❖ 「 📊 𝗖𝗮𝗿𝗱 𝗦𝘆𝗻𝗰 𝗟𝗼𝗴𝘀 」\n`;
   const body   =
     `   │ 🎴 Total cards: *${totalCards}* (${shoobCards} from Shoob)\n` +
     `   │ 🔗 Tracked Shoob IDs: *${trackedIds}*\n` +

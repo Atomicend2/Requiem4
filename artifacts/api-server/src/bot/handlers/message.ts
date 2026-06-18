@@ -15,7 +15,7 @@ import { handleRpg } from "../commands/rpg.js";
 import { handleGuilds } from "../commands/guilds.js";
 import { handleStaff } from "../commands/staff.js";
 import { handleAI } from "../commands/ai.js";
-import { handleMenu, handleInfo, handleHelp } from "../commands/menu.js";
+import { handleMenu, handleInfo, handleHelp, handleSetMenuImage } from "../commands/menu.js";
 import { handleSummer } from "../commands/summer.js";
 import { handleLottery } from "../commands/lottery.js";
 import { handleConverter } from "../commands/converter.js";
@@ -27,10 +27,8 @@ import { getPersona } from "../commands/personas.js";
 import { getPersonaForSock } from "../bot-manager.js";
 import { handlePullCards, handleSyncCards, handleCardLogs } from "./shoob-sync.js";
 
-// Tracks which chats have already received the "Welcome Master" greeting this
-// session. Prevents the greeting from firing on every single message.
-// Resets when the process restarts (i.e., once per bot boot).
-const _ownerGreetedJids = new Set<string>();
+// "Welcome Master" greeting state now lives in the DB (users.owner_greeted),
+// so it fires exactly once ever — not once per process restart.
 
 export async function handleMessage(
   sock: WASocket,
@@ -233,14 +231,67 @@ export async function handleMessage(
   // Fires once per session when the owner sends their FIRST message (any
   // content, not just a command). Uses a module-level Set so it only sends
   // once per process startup, not once per message.
-  if (isOwner && !_ownerGreetedJids.has(from)) {
-    _ownerGreetedJids.add(from);
-    await sendText(
-      from,
-      `👑 *Welcome back, Master.*\n\n` +
-      `_${getBotName()} is at your command._\n\n` +
-      `⚡ All systems online. Type *.menu* to see available commands.`
-    ).catch(() => {});
+  if (isOwner) {
+    const ownerKey = lidFallbackPhone || senderPhone || rawSenderPhone || BOT_OWNER_PHONE;
+    const ownerRow = getUser(ownerKey);
+    if (!ownerRow?.owner_greeted) {
+      const staffCommandList =
+`👑 *Welcome back, Master.*
+
+_${getBotName()} is at your command._
+⚡ All systems online.
+
+Here is your full staff command reference — these are not shown in *.menu* since they're privileged-only.
+
+*🛡️ STAFF MANAGEMENT*
+• *.addmod <phone>* — Appoint a mod (mod+ can run this)
+• *.addguardian <phone>* — Appoint a guardian (mod+ can run this)
+• *.addrole <phone> <mod|guardian>* — Same as above, explicit role
+• *.removemod <phone>* / *.removeguardian <phone>* — Remove a staff member (cannot remove an owner)
+• *.recruit <phone>* — Add someone as a recruit (lowest staff tier)
+• *.modlist* / *.mods* — List all current staff and their roles
+
+*🤖 BOT MANAGEMENT*
+• *.bots* — Live status of every connected bot instance
+• *.show* — Current bot's name, ID, and online count
+• *.join <invite_link>* — Make the bot join a group via invite link
+• *.exit* — Make the bot leave the current group
+• *.post <message>* — Broadcast an announcement to every group the bot is in
+• *.setmenuimg* — Set the image attached to every *.menu* (reply to an image)
+
+*💰 ECONOMY & ACCESS CONTROL*
+• *.addpremium <phone> [days=30]* — Grant Premium status
+• *.removepremium <phone>* — Revoke Premium status
+• *.resetbal <phone>* — Reset a user's balance only
+• *.reset <phone>* — Fully wipe a user's profile (*owner only*)
+• *.addinv <phone> <item>* — Give a user an inventory item
+
+*🔨 MODERATION*
+• *.ban <phone> [reason]* — Ban a user bot-wide
+• *.unban <phone>* — Lift a ban
+• *.banlist* — View everyone currently banned
+
+*🎴 CARD DATABASE*
+• *.fetchcards [tier] [limit]* — Import cards from Shoob.gg
+• *.pullcards* — Full bulk card import
+• *.synccards* — Incremental card sync
+• *.cardlogs* — View recent card sync activity
+• *.upload <tier> <name>, <series>* — Manually upload a card (reply to an image)
+
+*⚙️ GROUP UTILITIES (run inside a group)*
+• *.dc* / *.ac* / *.rc* — Disable / enable / restrict card spawning in this group
+• *.setms <message>* / *.delms* — Set or delete the milestone message
+
+> _This message only sends once. Type *.menu* anytime for the regular command list._`;
+
+      await sendText(from, staffCommandList).catch(() => {});
+      try {
+        ensureUser(ownerKey, msg.pushName || undefined);
+        updateUser(ownerKey, { owner_greeted: 1 });
+      } catch (err) {
+        logger.debug({ err }, "Could not persist owner_greeted flag");
+      }
+    }
   }
   // ────────────────────────────────────────────────────────────────────────
 
@@ -487,7 +538,17 @@ const UNREG_ALLOWED_CMDS = new Set([
 async function dispatch(ctx: CommandContext): Promise<void> {
   const { command, from, sender, msg } = ctx;
 
-  if (!UNREG_ALLOWED_CMDS.has(command)) {
+  const isPrivilegedStaff = !!getStaff(sender) || (!!ctx.lidFallbackPhone && !!getStaff(ctx.lidFallbackPhone));
+  if (isPrivilegedStaff && !getUser(sender) && !(ctx.lidFallbackPhone && getUser(ctx.lidFallbackPhone))) {
+    try {
+      const { ensureUser: ensureStaffUser } = await import("../db/queries.js");
+      const staffPhone = ctx.lidFallbackPhone || sender.split("@")[0].split(":")[0].replace(/\D/g, "");
+      ensureStaffUser(staffPhone, msg.pushName || undefined);
+    } catch (err) {
+      logger.debug({ err }, "Could not auto-ensure staff user row");
+    }
+  }
+  if (!UNREG_ALLOWED_CMDS.has(command) && !ctx.isOwner && !isPrivilegedStaff) {
     // getUser() extracts the phone from the JID. If group metadata resolution
     // failed and sender is still an @lid JID, the extracted digits are the LID,
     // not the phone — so look up by LID as a fallback before giving up.
@@ -511,6 +572,14 @@ async function dispatch(ctx: CommandContext): Promise<void> {
   switch (command) {
     case "menu":
       return handleMenu(ctx);
+
+    case "setmenuimg": {
+      if (!ctx.isOwner && getStaff(sender)?.role !== "guardian") {
+        await sendText(from, "❌ Only the owner or a guardian can set the menu image.");
+        return;
+      }
+      return handleSetMenuImage(ctx);
+    }
 
     case "ping":
     case "test":
@@ -577,7 +646,13 @@ async function dispatch(ctx: CommandContext): Promise<void> {
     //   4c. Deletes any row that claimed the same lid under a different phone
     // After the transaction exactly ONE row owns this phone, ONE owns this lid.
     case "verify": {
-      const senderPhone = sender.split("@")[0].split(":")[0];
+      // Must derive the OTP lookup key EXACTLY the same way .link/.reg derived
+      // it when storing the OTP (senderPhone2 there), or a lidFallbackPhone
+      // mismatch between the two messages causes a false "no pending request"
+      // even though the code was sent correctly seconds earlier.
+      const senderPhone = ctx.senderRaw.endsWith("@lid")
+        ? (ctx.lidFallbackPhone || sender.split("@")[0].split(":")[0])
+        : sender.split("@")[0].split(":")[0];
       const already = getUser(senderPhone);
       // Short-circuit only when FULLY linked (both registered AND lid set)
       if (already?.registered && already?.lid) {

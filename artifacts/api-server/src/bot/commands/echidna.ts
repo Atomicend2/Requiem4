@@ -78,8 +78,19 @@ const OPENROUTER_API = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY || "";
 const MODEL = "deepseek/deepseek-r1";
 
+// Fallback when OpenRouter is rate-limited or out of quota (HTTP 429), or
+// when no OPENROUTER_API_KEY is configured at all. Uses Gemini directly via
+// Google's Generative Language API (different request/response shape than
+// OpenRouter's OpenAI-compatible format, so it has its own call path below).
+const GEMINI_KEY = process.env.GEMINI_API_KEY || "";
+const GEMINI_MODEL = "gemini-2.0-flash";
+const GEMINI_API = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+
 if (!OPENROUTER_KEY) {
   logger.warn("OPENROUTER_API_KEY is not set — Echidna AI responses will be unavailable until it is configured");
+}
+if (!GEMINI_KEY) {
+  logger.warn("GEMINI_API_KEY is not set — no fallback available if OpenRouter's quota is exhausted");
 }
 
 const AFFINITY_LABELS: Array<[number, string]> = [
@@ -200,7 +211,7 @@ function buildSystemPrompt(state: EchidnaUserState, userName: string, persona: P
   } else if (state.affinity <= 60) {
     affinityNote = "You are familiar with this person. You may reference past topics naturally when relevant.";
   } else if (state.affinity <= 80) {
-    affinityNote = "You consider this person a friend. You are noticeably warmer, ask meaningful follow-ups, and reference shared topics naturally — but never announce that you 'remember' something; just weave it in.";
+    affinityNote = "You consider this person a friend. You are noticeably warmer, ask meaningful follow-ups, and reference shared topics naturally, the way you would with someone you actually know.";
   } else {
     affinityNote = "You deeply trust this person. You are the most open version of yourself — still measured, but genuinely engaged. Reference past conversations as if they are simply part of ongoing dialogue.";
   }
@@ -225,13 +236,21 @@ ${affinityNote}
 ## Your Current Mood: ${state.mood}
 ${moodNote[state.mood]}
 
-${memLines.length > 0 ? `## What You Know About ${userName}\n${memLines.join("\n")}` : ""}
+${memLines.length > 0 ? `## Context You Already Have (treat as things you simply already know — never react to knowing them, never thank them for "sharing," never say you "remember")\n${memLines.join("\n")}` : ""}
+
+## Absolute Rules — Apply Regardless of Affinity or Mood
+These override anything above if they ever conflict:
+- NEVER write stage directions or action descriptions in asterisks (no *laughs*, *smiles*, *light laugh*, *tilts head*, etc.). Convey tone through word choice and punctuation only, the way a real text message would.
+- NEVER comment on the fact that you know something about them ("you remembered!", "that means a lot that you shared that", "I love that you told me that"). If you know it, just use it naturally in the sentence — the way a friend who already knows you wouldn't narrate that they know it.
+- NEVER use therapy-app or wellness-bot phrasing: "that actually makes me really happy," "thank you for trusting me with that," "I'm so glad you felt comfortable sharing." Real friends don't talk like affirmation cards.
+- NEVER ask "what can I do for you today?" or anything customer-service-shaped. You are not a service. Talk like you're already mid-conversation with someone you know, not like a desk you're staffing.
+- Sound like the character would actually text, not like an AI performing warmth. If a line could be mistaken for a wellness app notification, rewrite it.
 
 ## Memory Instruction
 If you learn any of the following from this conversation, append a JSON block at the very end of your response (the backend will parse and strip it before delivery):
 <${persona.memoryTag}>{"field": "value"}</${persona.memoryTag}>
 Fields: name, nickname, hobbies (array), favorite_anime, favorite_games (array), favorite_drink, favorite_food, working_on, exam_info, important_events (array), frequently_discussed (array).
-Only include this block when you actually learned something new.
+Only include this block when you actually learned something new. This block is invisible to them — it is not something you "do" in the conversation, so never reference adding it.
 
 Stay fully in character as described above. Act accordingly.`;
 }
@@ -244,7 +263,7 @@ async function callEchidna(
   userMessage: string,
   persona: PersonaDef
 ): Promise<string> {
-  if (!OPENROUTER_KEY) {
+  if (!OPENROUTER_KEY && !GEMINI_KEY) {
     return "My apologies — it seems my connection to the arcane network has not yet been established. The administrator must configure my key before I can speak freely.";
   }
   const systemPrompt = buildSystemPrompt(state, userName, persona);
@@ -260,6 +279,11 @@ async function callEchidna(
     ...history,
     { role: "user" as const, content: userMessage },
   ];
+
+  // If OpenRouter has no key at all, skip straight to Gemini (if configured).
+  if (!OPENROUTER_KEY) {
+    return callGeminiFallback(systemPrompt, history, userMessage);
+  }
 
   try {
     const resp = await axios.post(
@@ -284,12 +308,69 @@ async function callEchidna(
   } catch (err: any) {
     const status = (err as any)?.response?.status;
     logger.error({ err: err?.message, status }, "Echidna OpenRouter call failed");
+
+    // 429 = OpenRouter quota/rate-limit exhausted. Fall back to Gemini rather
+    // than immediately giving up, if a GEMINI_API_KEY is configured.
+    if (status === 429 && GEMINI_KEY) {
+      logger.warn("OpenRouter quota exhausted — falling back to Gemini for this reply");
+      return callGeminiFallback(systemPrompt, history, userMessage);
+    }
     if (status === 401 || status === 403) {
+      if (GEMINI_KEY) {
+        logger.warn("OpenRouter key invalid/revoked — falling back to Gemini for this reply");
+        return callGeminiFallback(systemPrompt, history, userMessage);
+      }
       return "My apologies — it seems my key to the arcane network has been revoked. The administrator must update the OPENROUTER_API_KEY.";
     }
     if (status === 429) {
       return "My apologies. The arcane network is momentarily overloaded. Try again in a moment.";
     }
+    return "My apologies. It seems our connection is momentarily strained. Do try again.";
+  }
+}
+
+// ─── Gemini fallback call ──────────────────────────────────────────────────────
+// Google's Generative Language API uses a different shape than OpenAI/OpenRouter:
+// - No "system" role inside `contents`; the system prompt goes in a separate
+//   top-level `systemInstruction` field.
+// - Messages use `role: "user" | "model"` (not "assistant") and a `parts` array
+//   of { text } objects instead of a flat `content` string.
+async function callGeminiFallback(
+  systemPrompt: string,
+  history: Array<{ role: "user" | "assistant"; content: string }>,
+  userMessage: string
+): Promise<string> {
+  if (!GEMINI_KEY) {
+    return "My apologies. It seems our connection is momentarily strained. Do try again.";
+  }
+
+  const contents = [
+    ...history.map((h) => ({
+      role: h.role === "assistant" ? "model" : "user",
+      parts: [{ text: h.content }],
+    })),
+    { role: "user", parts: [{ text: userMessage }] },
+  ];
+
+  try {
+    const resp = await axios.post(
+      `${GEMINI_API}?key=${GEMINI_KEY}`,
+      {
+        contents,
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        generationConfig: { maxOutputTokens: 400 },
+      },
+      {
+        headers: { "Content-Type": "application/json" },
+        timeout: 20000,
+      }
+    );
+
+    const text = resp.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+    return text || "...";
+  } catch (err: any) {
+    const status = (err as any)?.response?.status;
+    logger.error({ err: err?.message, status }, "Echidna Gemini fallback call failed");
     return "My apologies. It seems our connection is momentarily strained. Do try again.";
   }
 }

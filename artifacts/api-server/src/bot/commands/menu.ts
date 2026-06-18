@@ -2,12 +2,15 @@ import type { CommandContext } from "./index.js";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { getDb } from "../db/database.js";
+import { getDb, DB_DIR } from "../db/database.js";
 import { getMentionName } from "../db/queries.js";
 import { mentionTag } from "../utils.js";
 import { getBotName } from "../connection.js";
+import { downloadMediaMessage } from "@whiskeysockets/baileys";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const MENU_ASSETS_DIR = path.join(DB_DIR, "menu-assets");
+if (!fs.existsSync(MENU_ASSETS_DIR)) fs.mkdirSync(MENU_ASSETS_DIR, { recursive: true });
 
 export async function handleMenu(ctx: CommandContext): Promise<void> {
   const { from, sender, sock } = ctx;
@@ -17,7 +20,7 @@ export async function handleMenu(ctx: CommandContext): Promise<void> {
   const botName = getBotName();
 
   const menuText =
-`🌸━━━『 𝗥𝗘𝗤𝗨𝗜𝗘𝗠 𝗢𝗥𝗗𝗘𝗥 反逆 』━━━🌸
+`🌸━━━『 𝗥𝗘𝗤𝗨𝗜𝗘𝗠 反逆 』━━━🌸
 
 ✦ Where Stars Touch The Sky ✦
 
@@ -33,116 +36,117 @@ export async function handleMenu(ctx: CommandContext): Promise<void> {
 ❀━━━━━━━━━━━━━━❀
             📋 𝗠𝗔𝗜𝗡
 ❀━━━━━━━━━━━━━━❀
-➺ .menu — Full command list
-➺ .ping — Check bot status
-➺ .website — Bot website link
-➺ .community — Join the community
-➺ .bots — List active bots
-➺ .afk [reason] — Set yourself AFK
-➺ .help / .info — Guide & stats
-➺ .uptime — How long the bot's been running
+➺ .menu
+➺ .ping
+➺ .website
+➺ .community
+➺ .bots
+➺ .afk
+➺ .help / .info
+➺ .uptime
 
 ❀━━━━━━━━━━━━━━❀
             ⚙️ 𝗔𝗗𝗠𝗜𝗡
 ❀━━━━━━━━━━━━━━❀
-➺ .kick — Remove a member
-➺ .delete / .del / .d — Delete a message
-➺ .antilink set [action] — Auto-remove links
-➺ .warn @user [reason] — Warn a member (5 = kick)
-➺ .resetwarn — Clear warnings
-➺ .groupinfo / .gi — Group details
-➺ .welcome on/off — Toggle welcome messages
-➺ .setwelcome / .setleave — Custom join/leave text
-➺ .promote / .demote — Admin management
-➺ .mute / .unmute — Silence a member
-➺ .hidetag / .tagall — Tag everyone
-➺ .open / .close — Open/close the group
-➺ .purge [code] — Remove non-admins by country code
-➺ .antism on/off — Delete status-mention spam
-➺ .blacklist add/remove/list — Block numbers
-➺ .groupstats / .gs — Group activity stats
+➺ .kick
+➺ .delete / .del / .d
+➺ .antilink set [action]
+➺ .warn @user [reason]
+➺ .resetwarn
+➺ .groupinfo / .gi
+➺ .welcome on/off
+➺ .setwelcome / .setleave
+➺ .promote / .demote
+➺ .mute / .unmute
+➺ .hidetag / .tagall
+➺ .open / .close
+➺ .purge [code]
+➺ .antism on/off
+➺ .blacklist add/remove/list
+➺ .groupstats / .gs
+➺ .setmenuimg
 
 ❀━━━━━━━━━━━━━━❀
         💰 𝗘𝗖𝗢𝗡𝗢𝗠𝗬
 ❀━━━━━━━━━━━━━━❀
-➺ .bal / .balance — Wallet & bank
-➺ .gems — Card-draw currency
-➺ .premium / .membership — Premium status
-➺ .daily — Daily reward
-➺ .withdraw / .deposit — Move money
-➺ .donate [amount] — Donate to another user
-➺ .richlist / .richlg — Top balances
-➺ .register / .reg — Register / link your account
-➺ .setname <name> — Change display name
-➺ .setpp / .setbg — Set profile picture / background
-➺ .profile / .p — View your profile card
-➺ .bio [text] / .setage [age] — Edit profile details
-➺ .inventory / .shop / .buy — Browse and buy items
-➺ .leaderboard / .lb — Global rankings
-➺ .work / .dig / .fish / .beg — Earn money
-➺ .steal / .roast — Risk-it activities
-➺ .stats / .cds — Your stats & cooldowns
+➺ .bal / .balance
+➺ .gems
+➺ .premium / .membership
+➺ .daily
+➺ .withdraw / .deposit
+➺ .donate [amount]
+➺ .richlist / .richlg
+➺ .register / .reg
+➺ .setname <name>
+➺ .setpp / .setbg
+➺ .profile / .p
+➺ .bio [text] / .setage [age]
+➺ .inventory / .shop / .buy
+➺ .leaderboard / .lb
+➺ .work / .dig / .fish / .beg
+➺ .steal / .roast
+➺ .stats / .cds
 
 ❀━━━━━━━━━━━━━━❀
            🎴 𝗖𝗔𝗥𝗗𝗦
 ❀━━━━━━━━━━━━━━❀
-➺ .collection / .coll — Your card collection
-➺ .deck / .sdi — View/manage your deck
-➺ .card [index] — View a specific card
-➺ .cardinfo / .ci <name> — Card lookup
-➺ .sc <name> — Search cards by name
-➺ .si <name> — Search index
-➺ .ss <series> — All cards in a series
-➺ .slb <series> — Series leaderboard
-➺ .cs <series> — Your cards from a series
-➺ .mycollectionseries — Your collection by series
-➺ .cardleaderboard / .cardlb — Top collectors
-➺ .cardshop / .stardust — Card shop & currency
-➺ .get [id] — Claim a card
-➺ .vs @user — Battle another player's deck
-➺ .auction / .myauc — Manage auctions
-➺ .listauc / .bid [id] [amt] — Browse & bid
-➺ .cg @user — Challenge to a card game
-➺ .ctd / .lcd / .retrieve — Trade/lend cards
-➺ .sellc / .tc — Sell or transfer cards
-➺ .accept / .decline — Respond to trade offers
+➺ .collection / .coll
+➺ .deck / .sdi
+➺ .card [index]
+➺ .cardinfo / .ci <name>
+➺ .sc <name>
+➺ .si <name>
+➺ .ss <series>
+➺ .slb <series>
+➺ .cs <series>
+➺ .mycollectionseries
+➺ .cardleaderboard / .cardlb
+➺ .cardshop / .stardust
+➺ .get [id]
+➺ .vs @user
+➺ .auction / .myauc
+➺ .listauc / .bid [id] [amt]
+➺ .cg @user
+➺ .ctd / .lcd / .retrieve
+➺ .sellc / .tc
+➺ .accept / .decline
 
 ❀━━━━━━━━━━━━━━❀
            🎮 𝗚𝗔𝗠𝗘𝗦
 ❀━━━━━━━━━━━━━━❀
-➺ .tictactoe / .ttt — Tic Tac Toe
-➺ .connectfour / .c4 — Connect Four
-➺ .wcg / .wordchain — Word Chain (real words only!)
-➺ .startbattle — Start a battle game
-➺ .truthordare / .td — Truth or Dare
-➺ .stopgame — End the current game
+➺ .tictactoe / .ttt
+➺ .connectfour / .c4
+➺ .wcg / .wordchain
+➺ .startbattle
+➺ .truthordare / .td
+➺ .stopgame
 
 ❀━━━━━━━━━━━━━━❀
               🃏 𝗨𝗡𝗢
 ❀━━━━━━━━━━━━━━❀
-➺ .uno / .startuno — Start a UNO round
-➺ .unoplay / .unodraw — Play / draw a card
-➺ .unohand — View your hand
+➺ .uno / .startuno
+➺ .unoplay / .unodraw
+➺ .unohand
 
 ❀━━━━━━━━━━━━━━❀
             🎲 𝗚𝗔𝗠𝗕𝗟𝗘
 ❀━━━━━━━━━━━━━━❀
-➺ .slots / .dice / .casino — Casino games
-➺ .coinflip / .cf — Flip a coin
-➺ .doublebet / .doublepayout — Double-or-nothing
-➺ .roulette / .horse / .spin — More betting games
+➺ .slots / .dice / .casino
+➺ .coinflip / .cf
+➺ .doublebet / .doublepayout
+➺ .roulette / .horse / .spin
 
 ❀━━━━━━━━━━━━━━❀
             🎭 𝗙𝗨𝗡
 ❀━━━━━━━━━━━━━━❀
-➺ .fancy <1-35> <text> — Stylized text
-➺ .gay / .lesbian / .simp — Fun tags
-➺ .match / .ship / .relation — Compatibility fun
-➺ .character / .psize / .pp — Fun stat generators
-➺ .skill / .duality / .gen — More generators
-➺ .pov / .social — POV & social prompts
-➺ .wouldyourather / .wyr — Would You Rather
-➺ .joke — Random joke
+➺ .fancy <1-35> <text>
+➺ .gay / .lesbian / .simp
+➺ .match / .ship / .relation
+➺ .character / .psize / .pp
+➺ .skill / .duality / .gen
+➺ .pov / .social
+➺ .wouldyourather / .wyr
+➺ .joke
 
 ❀━━━━━━━━━━━━━━❀
       👤 𝗜𝗡𝗧𝗘𝗥𝗔𝗖𝗧𝗜𝗢𝗡
@@ -155,13 +159,19 @@ export async function handleMenu(ctx: CommandContext): Promise<void> {
 ➺ .tickle / .shrug
 
 ✨ ━━━━━━━━━━━━━━✨
-♣️ A king does not need to be loved —
-⭐ only obeyed, or remembered. 反逆
+♣️ The world is cruel, yet beautiful. 反逆
 ✨ ━━━━━━━━━━━━━━✨`;
 
   try {
     const db = getDb();
-    const bot = db.prepare("SELECT menu_image_url FROM bots WHERE is_primary = 1").get() as any;
+    // is_primary is never actually set anywhere in this codebase (single-bot
+    // setup), so relying on it always returned nothing even when an image
+    // was configured. Prefer is_primary = 1 if it's ever set, otherwise fall
+    // back to the only/first bot row.
+    const bot = (
+      db.prepare("SELECT id, menu_image_url FROM bots WHERE is_primary = 1").get() ||
+      db.prepare("SELECT id, menu_image_url FROM bots ORDER BY created_at ASC LIMIT 1").get()
+    ) as any;
     const imageUrl = bot?.menu_image_url;
 
     if (imageUrl) {
@@ -191,6 +201,8 @@ export async function handleMenu(ctx: CommandContext): Promise<void> {
       }
     }
 
+    // No image configured (or it failed to load) — send text-only, but let
+    // the owner/guardian know how to fix that instead of silently degrading.
     await sock.sendMessage(from, {
       text: menuText,
       mentions: [sender],
@@ -200,6 +212,61 @@ export async function handleMenu(ctx: CommandContext): Promise<void> {
       text: menuText,
       mentions: [sender],
     });
+  }
+}
+
+// .setmenuimg — owner/guardian only. Reply to an image (or send one) with
+// .setmenuimg to set the image that accompanies every .menu send from then on.
+export async function handleSetMenuImage(ctx: CommandContext): Promise<void> {
+  const { from, msg, sock } = ctx;
+
+  const directImage = msg.message?.imageMessage ? msg : null;
+  const context = msg.message?.extendedTextMessage?.contextInfo;
+  const quoted = context?.quotedMessage;
+  const quotedImage = quoted?.imageMessage ? quoted : null;
+  const target = directImage || (quotedImage ? {
+    key: {
+      remoteJid: from,
+      fromMe: false,
+      id: context?.stanzaId || "",
+      participant: context?.participant,
+    },
+    message: quotedImage,
+  } : null);
+
+  if (!target) {
+    await sock.sendMessage(from, {
+      text: "❌ Send an image with the caption *.setmenuimg*, or reply to an image with *.setmenuimg*.",
+    });
+    return;
+  }
+
+  try {
+    const downloaded = await downloadMediaMessage(
+      target as any,
+      "buffer",
+      {},
+      { reuploadRequest: (sock as any).updateMediaMessage } as any
+    );
+    const buffer = Buffer.isBuffer(downloaded) ? downloaded : Buffer.from(downloaded as any);
+
+    const filePath = path.join(MENU_ASSETS_DIR, "menu.jpg");
+    fs.writeFileSync(filePath, buffer);
+
+    const db = getDb();
+    const bot = (
+      db.prepare("SELECT id FROM bots WHERE is_primary = 1").get() ||
+      db.prepare("SELECT id FROM bots ORDER BY created_at ASC LIMIT 1").get()
+    ) as any;
+    if (!bot) {
+      await sock.sendMessage(from, { text: "❌ No bot record found to attach the image to. Contact the developer." });
+      return;
+    }
+    db.prepare("UPDATE bots SET menu_image_url = ? WHERE id = ?").run(filePath, bot.id);
+
+    await sock.sendMessage(from, { text: "✅ Menu image updated. Every *.menu* from now on will include it." });
+  } catch (err) {
+    await sock.sendMessage(from, { text: "❌ Couldn't save that image. Try again with a JPG or PNG." });
   }
 }
 
@@ -222,7 +289,8 @@ export async function handleHelp(ctx: CommandContext): Promise<void> {
     `• *.blacklist add/remove [number]* — Block a phone number from the group\n` +
     `• *.purge [country_code]* — Remove all non-admins from a country code\n` +
     `• *.welcome on/off / .setwelcome [msg]* — New member message\n` +
-    `• *.hidetag [text]* — Silently tag all members\n\n` +
+    `• *.hidetag [text]* — Silently tag all members\n` +
+    `• *.setmenuimg* — Set the image attached to .menu (reply to an image)\n\n` +
     `*💰 ECONOMY*\n` +
     `• *.reg <phone>* — Register / link your WhatsApp account\n` +
     `• *.bal* — Wallet & bank balance\n` +

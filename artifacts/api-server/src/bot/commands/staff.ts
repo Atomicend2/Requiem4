@@ -48,7 +48,7 @@ export async function handleStaff(ctx: CommandContext): Promise<void> {
       return `   │✑  ${emoji} *${b.name || b.id}*${primary} — ${label}${phone}`;
     });
     const header =
-      `┌─❖\n│「 🆃🅴🅽🅺🆄 」\n└┬❖ 「 𝗕𝗢𝗧𝗦 」\n` +
+      `┌─❖\n│「 𝗥𝗘𝗤𝗨𝗜𝗘𝗠 」\n└┬❖ 「 𝗕𝗢𝗧𝗦 」\n` +
       `   │  ${connectedCount}/${bots.length} online\n`;
     const msg = header + lines.join("\n") + `\n   └────────────┈ ⳹`;
     await sendText(from, msg);
@@ -83,7 +83,7 @@ export async function handleStaff(ctx: CommandContext): Promise<void> {
       return `   ├────────────┈ ⳹\n   │ 「 ${emoji} ${label} ${emoji} 」\n${rows}\n`;
     };
 
-    let body = `┌─❖\n│「 🆃🅴🅽🅺🆄 」\n└┬❖ 「 👑 𝗦𝘁𝗮𝗳𝗳 👑 」\n`;
+    let body = `┌─❖\n│「 𝗥𝗘𝗤𝗨𝗜𝗘𝗠 」\n└┬❖ 「 👑 𝗦𝘁𝗮𝗳𝗳 👑 」\n`;
     body += formatSection("owner", "𝗢𝘄𝗻𝗲𝗿", "👑");
     body += formatSection("guardian", "𝗚𝘂𝗮𝗿𝗱𝗶𝗮𝗻𝘀", "🛡️");
     body += formatSection("mod", "𝗠𝗼𝗱𝘀", "⚔️");
