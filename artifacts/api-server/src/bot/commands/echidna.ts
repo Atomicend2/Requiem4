@@ -83,7 +83,7 @@ const MODEL = "deepseek/deepseek-r1";
 // Google's Generative Language API (different request/response shape than
 // OpenRouter's OpenAI-compatible format, so it has its own call path below).
 const GEMINI_KEY = process.env.GEMINI_API_KEY || "";
-const GEMINI_MODEL = "gemini-2.0-flash";
+const GEMINI_MODEL = "gemini-2.5-flash-lite";
 const GEMINI_API = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
 if (!OPENROUTER_KEY) {
