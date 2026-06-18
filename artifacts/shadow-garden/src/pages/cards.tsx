@@ -20,7 +20,7 @@ const TIER_CONFIG: Record<string, { label: string; bg: string; text: string; bor
   "TX": { label: "Exclusive", bg: "bg-yellow-500/20",text: "text-yellow-400",border: "border-yellow-500/40",glow: "shadow-[0_0_18px_rgba(250,204,21,0.6)]",  rate: "—"   },
 };
 
-const CARDS_PER_PAGE = 50;
+const CARDS_PER_PAGE = 10;
 
 // Fetches from the /from-json route which reads cards.json directly (always populated)
 async function fetchCardsFromJson(params: { page: number; tier?: string; search?: string }) {

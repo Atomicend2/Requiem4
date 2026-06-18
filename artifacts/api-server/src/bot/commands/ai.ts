@@ -54,8 +54,8 @@ export async function handleAI(ctx: CommandContext): Promise<void> {
 }
 
 async function getAIResponse(prompt: string, userId: string): Promise<string> {
-  const PROMPT_URL = "https://api.openai.com/v1/chat/completions";
-  const apiKey = process.env.OPENAI_API_KEY;
+  const PROMPT_URL = "https://openrouter.ai/api/v1/chat/completions";
+  const apiKey = process.env.OPENROUTER_API_KEY;
 
   if (!apiKey) {
     const fallbacks: Record<string, string> = {
@@ -75,7 +75,7 @@ async function getAIResponse(prompt: string, userId: string): Promise<string> {
   if (messages.length > 10) messages.splice(0, messages.length - 10);
 
   const resp = await axios.post(PROMPT_URL, {
-    model: "gpt-3.5-turbo",
+    model: "deepseek/deepseek-r1",
     messages: [
       { role: "system", content: "You are Requiem Order, a helpful WhatsApp bot assistant for Requiem Order (反逆) — the Heavenly Sky community. Be concise and friendly. Use emojis sparingly." },
       ...messages,

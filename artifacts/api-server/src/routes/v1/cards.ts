@@ -100,7 +100,7 @@ router.get("/from-json", (req, res) => {
     }
 
     const total = cards.length;
-    const limit = Math.min(Math.max(parseInt(limitStr || "50", 10) || 50, 1), 200);
+    const limit = Math.min(Math.max(parseInt(limitStr || "10", 10) || 10, 1), 200);
     const page  = Math.max(parseInt(pageStr || "1", 10) || 1, 1);
     const start = (page - 1) * limit;
     const paginated = cards.slice(start, start + limit);
@@ -392,13 +392,23 @@ router.post("/wishlist", requireAuth, async (req: AuthRequest, res) => {
   }
 
   const db = getDb();
-  const card = db.prepare("SELECT * FROM cards WHERE id = ?").get(cardId) as any;
+  // The frontend's card list (/from-json) sends shoob_id as the card's "id"
+  // for every Shoob-sourced card (the vast majority), since that's what
+  // cards.json keys cards by. The SQL `cards` table instead uses its own
+  // internally-generated random id as the primary key, with shoob_id stored
+  // in a separate column. Look up by shoob_id first — that's what the
+  // wishlist button is actually sending — and fall back to the internal id
+  // for manually-uploaded cards that have no shoob_id.
+  const card = (
+    db.prepare("SELECT * FROM cards WHERE shoob_id = ?").get(cardId) ||
+    db.prepare("SELECT * FROM cards WHERE id = ?").get(cardId)
+  ) as any;
   if (!card) {
     res.status(404).json({ success: false, message: "Card not found" });
     return;
   }
 
-  const owner = getCardOwner(db, cardId);
+  const owner = getCardOwner(db, card.id);
   if (!owner) {
     res.json({ success: true, message: "Card is unclaimed — no owner to notify" });
     return;

@@ -76,7 +76,7 @@ interface EchidnaUserState {
 
 const OPENROUTER_API = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY || "";
-const MODEL = "openai/gpt-4o";
+const MODEL = "deepseek/deepseek-r1";
 
 if (!OPENROUTER_KEY) {
   logger.warn("OPENROUTER_API_KEY is not set — Echidna AI responses will be unavailable until it is configured");

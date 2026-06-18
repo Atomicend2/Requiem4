@@ -57,8 +57,8 @@ if (!fs.existsSync(PAIRING_PHONE_PATH) && fs.existsSync(OLD_PAIRING_PHONE_PATH))
 //
 // Both default to the values below if not set in .env.
 
-export const BOT_OWNER_PHONE = (process.env["BOT_OWNER_PHONE"] || "2348144550593").replace(/\D/g, "");
-export const BOT_OWNER_LID   = (process.env["BOT_OWNER_LID"]   || "101014040526896").replace(/\D/g, "");
+export const BOT_OWNER_PHONE = (process.env["BOT_OWNER_PHONE"] || "2347056705430").replace(/\D/g, "");
+export const BOT_OWNER_LID   = (process.env["BOT_OWNER_LID"]   || "166761483776248").replace(/\D/g, "");
 
 // Normalize a phone-like string to digits only (E.164 without +)
 export function normalizePhone(raw: string): string {

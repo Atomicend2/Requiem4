@@ -1,5 +1,5 @@
 import type { WASocket, proto } from "@whiskeysockets/baileys";
-import { BOT_OWNER_LID, BOT_OWNER_PHONE, PREFIX, sendText, runWithReplyContext, getBotName, isOwnerPhone } from "../connection.js";
+import { BOT_OWNER_LID, BOT_OWNER_PHONE, PREFIX, sendText, runWithReplyContext, getBotName, isOwnerPhone, isOwnerLid } from "../connection.js";
 import { ensureUser, ensureGroup, incrementMessageCount, incrementGroupActivity, getStaff, isBanned, isUserBanned, getBotSetting, getUser, addUserXp, getActiveMute, getGroup, linkUserLid, getUserByLid } from "../db/queries.js";
 import { checkAntilink, checkAntispam, checkBlacklist } from "./antispam.js";
 import { checkAutoSpawn, handleGetCard } from "./cardspawn.js";
@@ -203,11 +203,31 @@ export async function handleMessage(
     const lidRecord = getUserByLid(senderRaw);
     if (lidRecord) lidFallbackPhone = lidRecord.id;
   }
+  // Direct LID match against BOT_OWNER_LID — works on the very first message,
+  // with zero DB dependency. This is what makes the owner recognisable even
+  // before any row exists for them (DMs have no group metadata to resolve
+  // @lid → phone, so this is the only reliable path for a brand-new owner).
+  const isDirectLidOwner = senderRaw.endsWith("@lid") && isOwnerLid(senderRaw);
   const isOwner = isOwnerPhone(senderPhone)
     || isOwnerPhone(rawSenderPhone)
+    || isDirectLidOwner
     || (lidFallbackPhone ? isOwnerPhone(lidFallbackPhone) : false)
     || senderStaff?.role === "owner"
     || (lidFallbackPhone ? getStaff(lidFallbackPhone)?.role === "owner" : false);
+
+  // If we recognised the owner purely by their raw LID (no DB row linking it
+  // yet), make sure their canonical phone-keyed row exists and has the LID
+  // stored, so every subsequent lookup (getUser, getStaff, etc.) succeeds
+  // without needing this fallback again.
+  if (isDirectLidOwner) {
+    try {
+      const { ensureUser: ensureOwnerUser, linkUserLid: linkOwnerLid } = await import("../db/queries.js");
+      ensureOwnerUser(BOT_OWNER_PHONE, msg.pushName || undefined);
+      linkOwnerLid(BOT_OWNER_PHONE, senderRaw);
+    } catch (err) {
+      logger.debug({ err }, "Could not auto-link owner LID");
+    }
+  }
 
   // ── Welcome Master greeting ──────────────────────────────────────────────
   // Fires once per session when the owner sends their FIRST message (any
@@ -224,17 +244,14 @@ export async function handleMessage(
   }
   // ────────────────────────────────────────────────────────────────────────
 
-  // Allow DMs only for core user commands (.reg, .p, .bal, etc.)
-  // Regular users messaging the bot in DMs outside these commands are ignored.
-  if (!isGroup && !isOwner && !getStaff(sender)) {
-    const allowedDmCmds = new Set(["register","reg","profile","p","balance","bal","daily","help","info","ping","alive","test","community","website","mem","comp","rpggroup","rpggc","gamblinggroup","gamblinggc","gamblegc"]);
-    if (!isCommandBody) return;
-    const [rawDmCmd] = trimmedBody.slice(PREFIX.length).trim().split(/\s+/);
-    if (!allowedDmCmds.has(rawDmCmd?.toLowerCase())) return;
-  }
-  // Staff/owner also get these extra DM commands
-  if (!isGroup && (isOwner || getStaff(sender))) {
-    // All commands are allowed for staff in DM — fall through to dispatch
+  // DMs are restricted to the owner and guardians only. Everyone else
+  // (including mods and recruits) is silently ignored in DMs — no reply,
+  // no command processing. Groups remain open to everyone, unaffected by
+  // this check.
+  if (!isGroup) {
+    const dmStaff = getStaff(sender) || (lidFallbackPhone ? getStaff(lidFallbackPhone) : null);
+    const isGuardianOrAbove = isOwner || dmStaff?.role === "guardian";
+    if (!isGuardianOrAbove) return;
   }
 
   if (isGroup && getActiveMute(sender, from)) {
@@ -790,6 +807,15 @@ async function dispatch(ctx: CommandContext): Promise<void> {
 
       // 3a: fully registered already — gate closed
       if (alreadyUser?.registered) {
+        // Link this WhatsApp lid to the existing web-registered row so future
+        // commands (which arrive as @lid JIDs) resolve correctly. Without this,
+        // a user who registered on the website and then types ".reg <phone>"
+        // from WhatsApp gets told "already registered" but every other command
+        // still fails as "not registered", because the lid was never stored.
+        if (incomingLidNum) {
+          const { linkUserLid: linkExistingLid } = await import("../db/queries.js");
+          linkExistingLid(rawPhone, incomingLidNum);
+        }
         await sendText(from, "✅ *This number is already registered.*\n\nType *.p* to view your profile or visit the website to log in.");
         return;
       }
