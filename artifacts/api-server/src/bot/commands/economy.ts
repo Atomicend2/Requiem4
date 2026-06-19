@@ -82,6 +82,12 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
   const { from, sender, args, command: cmd, groupMeta, resolvedMentions } = ctx;
 
   const user = ensureUser(sender);
+  // Canonical DB key — always user.id (the phone number string), never the raw
+  // sender JID which can still be an @lid value on the very first message
+  // before DB-based LID resolution fires. Using user.id here means every
+  // inventory read/write, balance update, and query below targets the correct
+  // row regardless of what JID format `sender` happens to have.
+  const userId = user?.id || sender.split("@")[0].split(":")[0];
   const now = Math.floor(Date.now() / 1000);
 
   if (REGISTERED_ONLY_CMDS.has(cmd) && !user.registered) {
@@ -101,7 +107,7 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
       FROM inventory i
       JOIN shop_items si ON LOWER(si.name) = LOWER(i.item)
       WHERE i.user_id = ? AND si.effect LIKE 'bank_cap:%' AND i.quantity > 0
-    `).all(sender.split("@")[0].split(":")[0]) as any[];
+    `).all(userId) as any[];
     const BASE_CAP = 50_000;
     const extraCap = bankNotes.reduce((sum, row) => {
       const cap = parseInt((row.effect as string).split(":")[1] || "0");
@@ -212,7 +218,7 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
       FROM inventory i
       JOIN shop_items si ON LOWER(si.name) = LOWER(i.item)
       WHERE i.user_id = ? AND si.effect LIKE 'bank_cap:%' AND i.quantity > 0
-    `).all(sender.split("@")[0].split(":")[0]) as any[];
+    `).all(userId) as any[];
 
     const extraCap = bankNotes.reduce((sum, row) => {
       const cap = parseInt((row.effect as string).split(":")[1] || "0");
@@ -268,7 +274,7 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
   }
 
   if (cmd === "cds") {
-    const rpg = ensureRpg(sender);
+    const rpg = ensureRpg(userId);
     const allCooldowns: Array<{ emoji: string; name: string; cd: number; last: number }> = [
       { emoji: "📅", name: "Daily",       cd: DAILY_COOLDOWN,   last: user.last_daily || 0 },
       { emoji: "💼", name: "Work",        cd: WORK_COOLDOWN,    last: user.last_work || 0 },
@@ -364,13 +370,13 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
       await sendText(from, "❌ Name must be between 2 and 20 characters.");
       return;
     }
-    const inv = getInventory(sender);
+    const inv = getInventory(userId);
     const sheet = inv.find((i) => i.item.toLowerCase().includes("rename sheet"));
     if (!sheet) {
       await sendText(from, "❌ You need a *Rename Sheet* to change your name.\nBuy one from the *.shop* for $91,000.");
       return;
     }
-    removeFromInventory(sender, sheet.item);
+    removeFromInventory(userId, sheet.item);
     updateUser(sender, { name });
     await sendText(from, `✅ Name changed to: *${name}*\n📃 1 Rename Sheet consumed.`);
     return;
@@ -538,7 +544,7 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
       "Dungeon Key": "🗝️",
       "Guild License": "📜",
     };
-    const inv = getInventory(sender);
+    const inv = getInventory(userId);
     if (inv.length === 0) {
       await sendText(from, "🎒 Your inventory is empty.");
       return;
@@ -600,17 +606,17 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
       return;
     }
     updateUser(sender, { balance: (user.balance || 0) - item.price });
-    addToInventory(sender, item.name);
+    addToInventory(userId, item.name);
     await sendText(from, `✅ Purchased *${item.name}* for $${formatNumber(item.price)}!`);
     return;
   }
 
   if (cmd === "sell") {
     const itemName = args.join(" ");
-    const inv = getInventory(sender);
+    const inv = getInventory(userId);
     const invEntry = inv.find((i) => i.item.toLowerCase() === itemName.toLowerCase());
     if (!invEntry) { await sendText(from, "❌ You don't have that item."); return; }
-    const removed = removeFromInventory(sender, invEntry.item);
+    const removed = removeFromInventory(userId, invEntry.item);
     if (!removed) { await sendText(from, "❌ Could not remove item."); return; }
     const item = getShopItem(invEntry.item);
     const sellPrice = Math.floor((item?.price || 100) * 0.5);
@@ -621,7 +627,7 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
 
   if (cmd === "use") {
     const itemName = args.join(" ");
-    const inv = getInventory(sender);
+    const inv = getInventory(userId);
     const entry = inv.find((i) => i.item.toLowerCase() === itemName.toLowerCase());
     if (!entry) { await sendText(from, "❌ You don't have that item."); return; }
 
@@ -629,15 +635,15 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
     if (!item) { await sendText(from, "❌ Unknown item effect."); return; }
 
     if (item.effect.startsWith("heal:")) {
-      const rpg = ensureRpg(sender);
+      const rpg = ensureRpg(userId);
       let heal = item.effect === "heal:full" ? rpg.max_hp : parseInt(item.effect.split(":")[1]);
       const newHp = Math.min(rpg.hp + heal, rpg.max_hp);
       const { updateRpg } = await import("../db/queries.js");
       updateRpg(sender, { hp: newHp });
-      removeFromInventory(sender, entry.item);
+      removeFromInventory(userId, entry.item);
       await sendText(from, `❤️ Used *${entry.item}*. HP: ${newHp}/${rpg.max_hp}`);
     } else {
-      removeFromInventory(sender, entry.item);
+      removeFromInventory(userId, entry.item);
       await sendText(from, `✅ Used *${entry.item}*. Effect applied!`);
     }
     return;
@@ -689,7 +695,7 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
       balance: (user.balance || 0) + value,
       last_dig: now,
     });
-    addToInventory(sender, find.item);
+    addToInventory(userId, find.item);
     await sendText(from, `⛏️ You dug and found: *${find.item}*!\n+$${formatNumber(value)}`);
     return;
   }
@@ -707,7 +713,7 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
       balance: (user.balance || 0) + value,
       last_fish: now,
     });
-    addToInventory(sender, catch_.item);
+    addToInventory(userId, catch_.item);
     await sendText(from, `🎣 You fished and caught: *${catch_.item}*!\n+$${formatNumber(value)}`);
     return;
   }
@@ -742,7 +748,7 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
       await sendText(from, "❌ Bots are not part of the economy system.");
       return;
     }
-    const inv = getInventory(sender);
+    const inv = getInventory(userId);
     const pistol = inv.find((i) => i.item.toLowerCase() === "pistol");
     if (!pistol) {
       await sendText(from, "❌ You need a *Pistol* to steal.\nBuy one from the *.shop* for $15,000.");
@@ -805,14 +811,14 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
   }
 
   if (cmd === "stats") {
-    const inv = getInventory(sender);
-    const rpg = ensureRpg(sender);
+    const inv = getInventory(userId);
+    const rpg = ensureRpg(userId);
     const level = Number(user.level || 1);
     const xp = Number(user.xp || 0);
     const xpNeeded = level * 100;
     const total = Number(user.balance || 0) + Number(user.bank || 0);
-    const rank = getUserRank(sender);
-    const guild = getUserGuild(sender);
+    const rank = getUserRank(userId);
+    const guild = getUserGuild(userId);
     await sendText(from,
       `╔ ❰ 📊 Sᴛᴀᴛs Pᴀɴᴇʟ ❱ ╗\n` +
       `║  👤 @${getMentionName(sender)}\n` +

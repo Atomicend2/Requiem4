@@ -154,6 +154,65 @@ router.get("/from-json", (req, res) => {
   }
 });
 
+// ── Card detail by shoob_id or internal id ────────────────────────────────────
+// GET /api/v1/cards/detail/:id
+// Returns full owners list + issue count for the card detail modal
+router.get("/detail/:id", (req, res) => {
+  const { id } = req.params;
+  if (!id) { res.status(400).json({ error: "id required" }); return; }
+
+  const db = getDb();
+
+  // Try shoob_id first (what cards.json uses), then internal id
+  let card: any = db.prepare("SELECT * FROM cards WHERE shoob_id = ?").get(id);
+  if (!card) card = db.prepare("SELECT * FROM cards WHERE id = ?").get(id);
+
+  const imageUrl = card ? getCardImageUrl(card) : (() => {
+    // Card not in DB yet — build CDN URL directly from the provided id (treated as shoob_id)
+    return `https://api.shoob.gg/site/api/cardr/${id}?size=400`;
+  })();
+
+  const internalId = card?.id;
+
+  // Fetch all owners from user_cards (up to 50)
+  const owners = internalId
+    ? (db.prepare(`
+        SELECT DISTINCT u.id, u.name
+        FROM user_cards uc
+        JOIN users u ON u.id = uc.user_id
+        WHERE uc.card_id = ?
+        ORDER BY uc.obtained_at ASC
+        LIMIT 50
+      `).all(internalId) as any[]).map((o: any) => ({ id: o.id, name: o.name || "Shadow" }))
+    : [];
+
+  const totalCopies = internalId
+    ? ((db.prepare("SELECT COUNT(*) as cnt FROM user_cards WHERE card_id = ?").get(internalId) as any)?.cnt || 0)
+    : 0;
+
+  // Also pull from cards.json for description/name if DB record missing
+  let jsonCard: any = null;
+  try {
+    if (fs.existsSync(CARDS_JSON_PATH)) {
+      const raw = fs.readFileSync(CARDS_JSON_PATH, "utf8");
+      const data = JSON.parse(raw);
+      jsonCard = (data.cards || []).find((c: any) => c.shoob_id === id || c.id === id) || null;
+    }
+  } catch {}
+
+  res.json({
+    id: card?.shoob_id || jsonCard?.shoob_id || id,
+    name: card?.name || jsonCard?.name || "Unknown Card",
+    tier: card?.tier || jsonCard?.tier || "T1",
+    series: card?.series || jsonCard?.series || "General",
+    description: card?.description || jsonCard?.description || "",
+    imageUrl,
+    isAnimated: ANIMATED_TIERS.has(card?.tier || jsonCard?.tier || ""),
+    totalCopies,
+    owners,
+  });
+});
+
 // ── Trigger cards.json → DB loader on-demand (no auth required for health) ───
 // POST /api/v1/cards/reload-from-json
 // Allows the web UI or an ops engineer to re-trigger the cards.json → SQLite sync

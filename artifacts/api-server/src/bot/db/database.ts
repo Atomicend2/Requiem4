@@ -629,6 +629,45 @@ function initSchema(db: Database.Database): void {
   // Create index on shoob_id for fast lookup during incremental sync
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cards_shoob_id ON cards (shoob_id) WHERE shoob_id IS NOT NULL;`);
 
+  // ── Ghost LID row cleanup (runs on every startup) ─────────────────────────
+  // Rows whose id is raw LID digits (not a phone) and registered=0 are ghosts
+  // created when @lid JIDs weren't resolved before DB writes. Merge their
+  // assets into the canonical phone-keyed row and delete them.
+  try {
+    const GHOST_CHILD_TABLES = [
+      "rpg_characters", "inventory", "user_cards", "message_counts",
+      "card_deck", "deck_backgrounds", "guild_members", "warnings",
+      "muted_users", "summer_tokens", "afk_users", "lottery_entries",
+    ];
+    const ghosts = db.prepare(
+      "SELECT id, lid, balance, xp, level FROM users " +
+      "WHERE COALESCE(registered,0)=0 " +
+      "AND (COALESCE(phone,'')='' OR phone=id) " +
+      "AND length(id)>11 " +
+      "AND id NOT LIKE '%@%' " +
+      "AND id NOT LIKE '%-%'"
+    ).all() as Array<{ id: string; lid: string | null; balance: number; xp: number; level: number }>;
+
+    for (const ghost of ghosts) {
+      const canonical = ghost.lid
+        ? (db.prepare("SELECT * FROM users WHERE lid = ? AND id != ?").get(ghost.lid, ghost.id) as any)
+        : null;
+      if (canonical) {
+        db.transaction(() => {
+          db.prepare("UPDATE users SET balance=balance+?,xp=MAX(xp,?),level=MAX(level,?) WHERE id=?")
+            .run(ghost.balance || 0, ghost.xp || 0, ghost.level || 0, canonical.id);
+          for (const t of GHOST_CHILD_TABLES) {
+            try { db.prepare(`UPDATE OR IGNORE ${t} SET user_id=? WHERE user_id=?`).run(canonical.id, ghost.id); } catch {}
+          }
+          db.prepare("DELETE FROM users WHERE id=?").run(ghost.id);
+        })();
+      }
+      // No canonical found — leave ghost (might be brand-new unverified user).
+    }
+  } catch (err) {
+    console.warn("[db] Ghost LID row cleanup (non-fatal):", err);
+  }
+  // ──────────────────────────────────────────────────────────────────────────
 }
 
 function ensureColumn(db: Database.Database, table: string, column: string, definition: string): void {

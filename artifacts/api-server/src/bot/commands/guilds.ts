@@ -11,6 +11,7 @@ export async function handleGuilds(ctx: CommandContext): Promise<void> {
   const { from, sender, args, command, sock, resolvedMentions } = ctx;
   const sub = args[0]?.toLowerCase();
   const user = ensureUser(sender);
+  const userId = user?.id || sender.split("@")[0].split(":")[0];
   const rpg = getDb().prepare("SELECT * FROM rpg_characters WHERE user_id = ?").get(sender) as any;
 
   if (command !== "guild") {
@@ -25,7 +26,7 @@ export async function handleGuilds(ctx: CommandContext): Promise<void> {
       await sendText(from, "❌ You need to be Level 20 to create a guild.");
       return;
     }
-    const existing = getUserGuild(sender);
+    const existing = getUserGuild(userId);
     if (existing) { await sendText(from, "❌ You're already in a guild. Leave first with .guild leave"); return; }
     if (getGuild(name)) { await sendText(from, "❌ A guild with that name already exists."); return; }
     const guildId = generateId(8);
@@ -39,7 +40,7 @@ export async function handleGuilds(ctx: CommandContext): Promise<void> {
     if (!name) { await sendText(from, "❌ Usage: .guild join [name]"); return; }
     const g = getGuild(name);
     if (!g) { await sendText(from, "❌ Guild not found."); return; }
-    const existing = getUserGuild(sender);
+    const existing = getUserGuild(userId);
     if (existing) { await sendText(from, "❌ You're already in a guild."); return; }
     joinGuild(sender, g.id);
     await sendText(from, `✅ Joined guild *${g.name}*!`);
@@ -47,7 +48,7 @@ export async function handleGuilds(ctx: CommandContext): Promise<void> {
   }
 
   if (sub === "leave") {
-    const g = getUserGuild(sender);
+    const g = getUserGuild(userId);
     if (!g) { await sendText(from, "❌ You're not in a guild."); return; }
     if (g.owner_id === sender) {
       await sendText(from, "❌ You're the guild owner. Disband it first with .guild disband");
@@ -60,7 +61,7 @@ export async function handleGuilds(ctx: CommandContext): Promise<void> {
 
   if (sub === "info") {
     const name = args.slice(1).join(" ");
-    const g = name ? getGuild(name) : getUserGuild(sender);
+    const g = name ? getGuild(name) : getUserGuild(userId);
     if (!g) { await sendText(from, "❌ Guild not found."); return; }
     const members = getGuildMembers(g.id);
     await sendText(from,
@@ -80,7 +81,7 @@ export async function handleGuilds(ctx: CommandContext): Promise<void> {
   }
 
   if (sub === "desc") {
-    const g = getUserGuild(sender);
+    const g = getUserGuild(userId);
     if (!g || g.owner_id !== sender) { await sendText(from, "❌ Only guild owners can set the description."); return; }
     const desc = args.slice(1).join(" ");
     getDb().prepare("UPDATE guilds SET description = ? WHERE id = ?").run(desc, g.id);
@@ -91,7 +92,7 @@ export async function handleGuilds(ctx: CommandContext): Promise<void> {
   if (sub === "kick") {
     const mentioned = resolvedMentions[0];
     if (!mentioned) { await sendText(from, "❌ Mention someone to kick."); return; }
-    const g = getUserGuild(sender);
+    const g = getUserGuild(userId);
     if (!g || g.owner_id !== sender) { await sendText(from, "❌ Only guild owners can kick members."); return; }
     kickFromGuild(mentioned, g.id);
     await sock.sendMessage(from, {
@@ -102,7 +103,7 @@ export async function handleGuilds(ctx: CommandContext): Promise<void> {
   }
 
   if (sub === "disband") {
-    const g = getUserGuild(sender);
+    const g = getUserGuild(userId);
     if (!g || g.owner_id !== sender) { await sendText(from, "❌ Only the guild owner can disband."); return; }
     disbandGuild(g.id);
     await sendText(from, `✅ Guild *${g.name}* has been disbanded.`);

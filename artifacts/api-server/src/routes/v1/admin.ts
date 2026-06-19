@@ -139,13 +139,23 @@ router.get("/stats", requireAdminAccess as any, async (req: AuthRequest, res) =>
   const totalBanned  = (db.prepare("SELECT COUNT(*) as c FROM banned_entities").get() as any)?.c || 0;
   const totalStaff   = (db.prepare("SELECT COUNT(*) as c FROM staff").get() as any)?.c || 0;
 
+  // Exclude ghost LID rows: rows where registered=0 AND id has no corresponding
+  // phone number (i.e. id is raw LID digits, not a real phone). Real unregistered
+  // accounts (created via website) have phone set; ghost rows from @lid resolution
+  // failures do not. Also exclude explicit bot rows.
   const recentUsers = db.prepare(
     `SELECT u.id, u.name, u.phone, u.level, u.xp, u.balance, u.bank,
       COALESCE(u.premium,0) as premium, COALESCE(u.is_bot,0) as is_bot,
       COALESCE(u.registered,0) as registered, u.created_at,
       (SELECT s.role FROM staff s WHERE s.user_id = u.id LIMIT 1) as role,
       (SELECT 1 FROM banned_entities WHERE id = u.id AND type='user') as is_banned
-    FROM users u WHERE COALESCE(u.is_bot,0)=0 ORDER BY u.created_at DESC LIMIT 20`
+    FROM users u
+    WHERE COALESCE(u.is_bot,0)=0
+      AND (
+        COALESCE(u.registered,0) = 1
+        OR (COALESCE(u.phone,'') != '' AND u.phone != '' )
+      )
+    ORDER BY u.created_at DESC LIMIT 20`
   ).all();
 
   const staffList = db.prepare(

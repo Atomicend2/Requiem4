@@ -138,6 +138,17 @@ export function isValidTier(tier: string): boolean {
   return ["T1","T2","T3","T4","T5","T6","TS","TX","TZ"].includes(tier.toUpperCase());
 }
 
+/** Returns true when the buffer contains a GIF (magic bytes 47 49 46 38 = "GIF8"). */
+export function isGifBuffer(buf: Buffer): boolean {
+  return (
+    buf.length >= 4 &&
+    buf[0] === 0x47 && // G
+    buf[1] === 0x49 && // I
+    buf[2] === 0x46 && // F
+    buf[3] === 0x38    // 8
+  );
+}
+
 export function normalizeId(id: string): string {
   if (!id.includes("@")) {
     return id.includes("-") ? `${id}@g.us` : `${id}@s.whatsapp.net`;

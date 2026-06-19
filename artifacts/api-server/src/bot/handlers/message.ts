@@ -1,6 +1,6 @@
 import type { WASocket, proto } from "@whiskeysockets/baileys";
 import { BOT_OWNER_LID, BOT_OWNER_PHONE, PREFIX, sendText, runWithReplyContext, getBotName, isOwnerPhone, isOwnerLid } from "../connection.js";
-import { ensureUser, ensureGroup, incrementMessageCount, incrementGroupActivity, getStaff, isBanned, isUserBanned, getBotSetting, getUser, addUserXp, getActiveMute, getGroup, linkUserLid, getUserByLid } from "../db/queries.js";
+import { ensureUser, ensureGroup, incrementMessageCount, incrementGroupActivity, getStaff, isBanned, isUserBanned, getBotSetting, getUser, updateUser, addUserXp, getActiveMute, getGroup, linkUserLid, getUserByLid } from "../db/queries.js";
 import { checkAntilink, checkAntispam, checkBlacklist } from "./antispam.js";
 import { checkAutoSpawn, handleGetCard } from "./cardspawn.js";
 import { checkAfkMention, checkSenderReturnedFromAfk, handleAfk } from "../commands/afk.js";
@@ -55,9 +55,10 @@ export async function handleMessage(
   if (msg.key.fromMe) return;
 
   // ── LID resolution ──────────────────────────────────────────────────────────
-  // Newer WhatsApp clients use @lid JIDs in groups (e.g. 101xxx@lid) instead
-  // of the real phone JID. Resolve to the real @s.whatsapp.net JID using
-  // group metadata so we always store the phone number as the user ID.
+  // Newer WhatsApp clients use @lid JIDs (e.g. 101xxx@lid) instead of the real
+  // phone JID — in groups AND in DMs. Resolve to the real @s.whatsapp.net JID
+  // using group metadata (groups only) so we always store the phone number as
+  // the user ID.
   const senderWasLid = sender.endsWith("@lid");
   if (senderWasLid && isGroup) {
     try {
@@ -71,6 +72,21 @@ export async function handleMessage(
         }
       }
     } catch {}
+  }
+  // DMs never have group metadata to resolve @lid → phone with, AND group
+  // resolution above can simply fail to find a match (bot lost admin, stale
+  // participant cache, just rejoined, etc). In both cases, fall back to the
+  // DB: if this exact LID was already linked to a phone-keyed row by a prior
+  // .verify, use that — instead of leaving `sender` as a raw @lid value that
+  // every downstream ensureUser()/getUser()/inventory call would otherwise
+  // key a brand-new ghost row off of.
+  let earlyLidFallbackPhone = "";
+  if (sender.endsWith("@lid")) {
+    const lidRecord = getUserByLid(senderRaw);
+    if (lidRecord?.id) {
+      earlyLidFallbackPhone = lidRecord.id;
+      sender = `${lidRecord.id}@s.whatsapp.net`;
+    }
   }
   // If we resolved an @lid JID, migrate the LID-keyed DB record to the real phone
   if (senderWasLid && !sender.endsWith("@lid")) {
@@ -113,7 +129,7 @@ export async function handleMessage(
             db.prepare("DELETE FROM users WHERE id = ?").run(lidNum);
           })();
         }
-      } else {
+      } else if (!earlyLidFallbackPhone) {
         // No LID-keyed row yet — just store the lid on the phone-keyed row for future reference
         linkUserLid(realPhone, senderRaw);
       }
@@ -194,10 +210,13 @@ export async function handleMessage(
   // the original senderRaw (pre-LID-resolution) so even if resolution failed
   // the owner can still be recognised by their phone number in the owner list.
   const rawSenderPhone = senderRaw.split("@")[0].split(":")[0].replace(/\D/g, "") || "";
-  // LID fallback: if resolution didn't work and sender is still @lid, look up
-  // by LID in the DB (the phone-keyed row stores the LID after first contact).
-  let lidFallbackPhone = "";
-  if (sender.endsWith("@lid")) {
+  // LID fallback: earlyLidFallbackPhone was already resolved above (before any
+  // DB writes) using the DB lid column. If sender was successfully rewritten to
+  // a phone JID up there, earlyLidFallbackPhone holds the phone digits and
+  // sender.endsWith("@lid") is now false — so this block is a safety net only
+  // for brand-new users whose @lid has no DB record yet (first-ever message).
+  let lidFallbackPhone = earlyLidFallbackPhone;
+  if (!lidFallbackPhone && sender.endsWith("@lid")) {
     const lidRecord = getUserByLid(senderRaw);
     if (lidRecord) lidFallbackPhone = lidRecord.id;
   }
@@ -284,7 +303,9 @@ Here is your full staff command reference — these are not shown in *.menu* sin
 
 > _This message only sends once. Type *.menu* anytime for the regular command list._`;
 
-      await sendText(from, staffCommandList).catch(() => {});
+      // Always DM the owner — even if they triggered this from inside a group
+      const ownerDmJid = `${ownerKey.replace(/\D/g, "")}@s.whatsapp.net`;
+      await sendText(ownerDmJid, staffCommandList).catch(() => {});
       try {
         ensureUser(ownerKey, msg.pushName || undefined);
         updateUser(ownerKey, { owner_greeted: 1 });
@@ -584,6 +605,8 @@ async function dispatch(ctx: CommandContext): Promise<void> {
     case "ping":
     case "test":
     case "alive":
+      // ⌛ reaction on the triggering message so the user gets instant feedback
+      await sock.sendMessage(from, { react: { text: "⌛", key: msg.key } }).catch(() => {});
       await sendText(from, `🌌 *${getBotName()}* — 反逆 Online\n> ${getPingMs(msg)}ms`);
       return;
 

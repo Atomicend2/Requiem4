@@ -69,12 +69,14 @@ export default function Profile() {
       <div className="rounded-xl relative overflow-hidden border border-primary/20 shadow-[0_0_60px_rgba(160,0,26,0.08)]">
         {/* Background image banner */}
         <div className="relative h-36 md:h-48 w-full overflow-hidden">
-          {bgUrl && (
+          {bgUrl ? (
             <img
               src={bgUrl}
               alt="profile background"
               className="w-full h-full object-cover"
             />
+          ) : (
+            <div className="w-full h-full bg-gradient-to-br from-[#050510] via-[#1a0a2e] to-[#0a0005]" />
           )}
           <div className="absolute inset-0 bg-gradient-to-b from-black/20 via-black/30 to-black/80" />
           <p className="absolute top-4 right-4 text-white/20 font-mono text-4xl font-bold select-none drop-shadow">反逆</p>
@@ -441,12 +443,10 @@ function AppearanceTab({ token, onPpUpdate, onBgUpdate }: { token: string | null
     enabled: !!token,
   });
 
-  const hasAvatar = statsData?.profile?.hasAvatar;
-  const hasBg = statsData?.profile?.hasBackground;
-
-  // Fetch current avatar/bg with auth token so the browser can display them
-  const currentAvatarUrl = useAuthMedia(hasAvatar ? "/api/v1/user/avatar" : null, token, ppCacheBust);
-  const currentBgUrl = useAuthMedia(hasBg ? "/api/v1/user/background" : null, token, bgCacheBust);
+  // Always fetch avatar/bg — server now serves an inline SVG-generated default
+  // when no custom image is set, so we never get 404 and always show something.
+  const currentAvatarUrl = useAuthMedia("/api/v1/user/avatar", token, ppCacheBust);
+  const currentBgUrl = useAuthMedia("/api/v1/user/background", token, bgCacheBust);
 
   const handleUpload = async (type: "pp" | "bg") => {
     const ref = type === "pp" ? ppRef : bgRef;

@@ -101,7 +101,7 @@ export async function handleLottery(ctx: CommandContext): Promise<void> {
     return;
   }
 
-  // ── .ll — view current pool status ────────────────────────────────────────
+  // ── .ll — view current pool status as a closed poll ─────────────────────
   if (cmd === "ll") {
     ensureUser(sender);
     const freshUser = db.prepare("SELECT * FROM users WHERE id = ?").get(userId) as any;
@@ -116,47 +116,103 @@ export async function handleLottery(ctx: CommandContext): Promise<void> {
       : false;
 
     const tickets = freshUser?.lottery_tickets || 0;
-    let statusLine = `🎫 Your tickets: *${tickets}*`;
-    if (isInLottery) statusLine += "\n✅ You are *in* this drawing";
-    else if (tickets > 0) statusLine += "\n💡 Type *.lottery* to enter!";
-
-    await sendText(
-      from,
-      `🎰 *Lottery Status — Requiem Order 反逆*\n\n${statusLine}\n👥 Participants: *${entryCount}/${MAX_PARTICIPANTS}*`
-    );
 
     if (!lottery || entryCount === 0) {
-      await sendText(from, "No active lottery pool yet. Buy a ticket from *.shop* and type *.lottery* to enter!");
+      await sendText(
+        from,
+        `🎰 *Lottery Status — Requiem Order 反逆*\n\n🎫 Your tickets: *${tickets}*\n👥 Participants: *0/${MAX_PARTICIPANTS}*\n\nNo active lottery pool yet. Buy a ticket from *.shop* and type *.lottery* to enter!`
+      );
       return;
     }
 
-    const image = await buildLotteryImageSafe(lottery.id);
-    if (image) {
-      await ctx.sock.sendMessage(from, { image, caption: "🎲 *Lottery Pool Status — REQUIEM ORDER 反逆*" });
+    // Fetch participant names (up to 12 — WhatsApp poll limit)
+    const entries = db.prepare(
+      `SELECT le.user_id, u.name
+       FROM lottery_entries le
+       LEFT JOIN users u ON u.id = le.user_id
+       WHERE le.lottery_id = ?
+       ORDER BY le.created_at ASC`
+    ).all(lottery.id) as any[];
+
+    const participantOptions: string[] = entries.slice(0, 12).map(
+      (e: any, i: number) => e.name || `Shadow ${i + 1}`
+    );
+    // Polls need ≥ 2 options — pad if needed
+    if (participantOptions.length < 2) {
+      participantOptions.push("⏳ Waiting for more players...");
     }
+
+    const yourStatus = isInLottery
+      ? "✅ You are IN this drawing"
+      : tickets > 0
+        ? `🎫 You have ${tickets} ticket(s) — type .lottery to enter!`
+        : "🎫 No tickets — buy one from .shop";
+
+    const poolTotal = lottery.pool ? `$${Number(lottery.pool).toLocaleString()}` : "$0";
+
+    await ctx.sock.sendMessage(from, {
+      poll: {
+        name: `🎰 Lottery Pool • ${entryCount}/${MAX_PARTICIPANTS} entered • ${yourStatus} • Prize pool: ${poolTotal}`,
+        values: participantOptions,
+        selectableCount: 0,
+      },
+    });
     return;
   }
 
-  // ── .lp — legacy alias for .ll ────────────────────────────────────────────
+  // ── .lp — same closed poll view as .ll ───────────────────────────────────
   if (cmd === "lp") {
-    const lottery = db.prepare(
+    ensureUser(sender);
+    const freshUser2 = db.prepare("SELECT * FROM users WHERE id = ?").get(userId) as any;
+    const lottery2 = db.prepare(
       "SELECT * FROM lotteries WHERE active = 1 ORDER BY created_at DESC LIMIT 1"
     ).get() as any;
-    if (!lottery) {
-      await sendText(from, "🎰 No active lottery. Buy a ticket from the shop and type *.lottery* to enter!");
+    const entryCount2 = lottery2
+      ? ((db.prepare("SELECT COUNT(*) as cnt FROM lottery_entries WHERE lottery_id = ?").get(lottery2.id) as any)?.cnt || 0)
+      : 0;
+    const isInLottery2 = lottery2
+      ? !!(db.prepare("SELECT 1 FROM lottery_entries WHERE lottery_id = ? AND user_id = ?").get(lottery2.id, userId))
+      : false;
+    const tickets2 = freshUser2?.lottery_tickets || 0;
+
+    if (!lottery2 || entryCount2 === 0) {
+      await sendText(
+        from,
+        `🎰 *Lottery Status — Requiem Order 反逆*\n\n🎫 Your tickets: *${tickets2}*\n👥 Participants: *0/${MAX_PARTICIPANTS}*\n\nNo active lottery pool yet. Buy a ticket from *.shop* and type *.lottery* to enter!`
+      );
       return;
     }
-    const entries = (
-      db.prepare("SELECT COUNT(*) as count FROM lottery_entries WHERE lottery_id = ?").get(lottery.id) as any
-    )?.count || 0;
-    await sendText(
-      from,
-      `🎰 *Requiem Order 反逆 Lottery*\n\n👥 Participants: ${entries}/${MAX_PARTICIPANTS}\n🏆 Winners drawn when ${MAX_PARTICIPANTS} enter`
+
+    const entries2 = db.prepare(
+      `SELECT le.user_id, u.name
+       FROM lottery_entries le
+       LEFT JOIN users u ON u.id = le.user_id
+       WHERE le.lottery_id = ?
+       ORDER BY le.created_at ASC`
+    ).all(lottery2.id) as any[];
+
+    const participantOptions2: string[] = entries2.slice(0, 12).map(
+      (e: any, i: number) => e.name || `Shadow ${i + 1}`
     );
-    const image = await buildLotteryImageSafe(lottery.id);
-    if (image) {
-      await ctx.sock.sendMessage(from, { image, caption: "🎲 Lottery Pool Status" });
+    if (participantOptions2.length < 2) {
+      participantOptions2.push("⏳ Waiting for more players...");
     }
+
+    const yourStatus2 = isInLottery2
+      ? "✅ You are IN this drawing"
+      : tickets2 > 0
+        ? `🎫 You have ${tickets2} ticket(s) — type .lottery to enter!`
+        : "🎫 No tickets — buy one from .shop";
+
+    const poolTotal2 = lottery2.pool ? `$${Number(lottery2.pool).toLocaleString()}` : "$0";
+
+    await ctx.sock.sendMessage(from, {
+      poll: {
+        name: `🎰 Lottery Pool • ${entryCount2}/${MAX_PARTICIPANTS} entered • ${yourStatus2} • Prize pool: ${poolTotal2}`,
+        values: participantOptions2,
+        selectableCount: 0,
+      },
+    });
     return;
   }
 

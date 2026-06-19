@@ -533,6 +533,37 @@ export async function handleEchidnaMessage(
     quotedMsg ? { quoted: quotedMsg as any } : undefined
   ).catch(() => {});
 
+  // ── Rare chatbot reaction on the user's original message ─────────────────
+  // Only fires once in a blue moon (~5% of messages) and only when the AI
+  // response or the incoming message contains a clear signal.
+  // Jokes → 😂  Dry jokes / sarcasm → 🙄  Kind gestures → ❤️
+  if (quotedMsg?.key && Math.random() < 0.05) {
+    let reactionEmoji: string | null = null;
+    const lowerBody   = body.toLowerCase();
+    const lowerCleaned = cleaned.toLowerCase();
+    // Dry joke / sarcasm signals (check first — more specific than generic joke)
+    const drySignals = /(oh sure|right sure|totally|oh definitely|clearly|obviously|wow thanks|great idea|brilliant|as if|sure jan|cool story|fascinating)|[🙄😒]/;
+    // Warm kind gesture signals
+    const kindSignals = /(thank you|thanks|appreciate|that means|you are amazing|you are sweet|so kind|made my day|i love you|love that|you.?re the best|means a lot)|[❤️🥹🫶💕]/;
+    // Regular joke/funny signals
+    const jokeSignals = /(haha|lol|lmao|hehe|so funny|that.?s funny|made me laugh|hilarious|dying|💀|😂|😹|🤣)/;
+
+    if (drySignals.test(lowerCleaned)) {
+      reactionEmoji = "🙄";
+    } else if (kindSignals.test(lowerBody) || kindSignals.test(lowerCleaned)) {
+      reactionEmoji = "❤️";
+    } else if (jokeSignals.test(lowerBody) || jokeSignals.test(lowerCleaned)) {
+      reactionEmoji = "😂";
+    }
+
+    if (reactionEmoji) {
+      await sock.sendMessage(from, {
+        react: { text: reactionEmoji, key: quotedMsg.key }
+      }).catch(() => {});
+    }
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
   // After text, optionally send a mood/affinity sticker if we have one
   if (stickers.length > 0 && state.affinity > 40 && Math.random() < 0.12) {
     const stickerBuf = getBotSetting(stickerKey(state.mood)) || getRandomSticker();

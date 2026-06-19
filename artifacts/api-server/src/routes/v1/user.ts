@@ -89,15 +89,31 @@ router.get("/avatar", requireAuth, async (req: AuthRequest, res) => {
     res.send(user.profile_picture);
     return;
   }
-  // Serve default avatar
+  // Try file-based default first
   const defaultPath = path.join(ASSETS_DIR, "default_pp.jpg");
   if (existsSync(defaultPath)) {
     res.set("Content-Type", "image/jpeg");
     res.set("Cache-Control", "public, max-age=86400");
     createReadStream(defaultPath).pipe(res);
-  } else {
-    res.status(404).json({ success: false, message: "No avatar set" });
+    return;
   }
+  // Generate an SVG default avatar inline — no file dependency
+  const initial = (user.name || user.id || "?").charAt(0).toUpperCase();
+  const svgAvatar = `<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256">
+    <defs>
+      <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#1a0a2e"/>
+        <stop offset="100%" stop-color="#0a0a0f"/>
+      </linearGradient>
+    </defs>
+    <circle cx="128" cy="128" r="128" fill="url(#g)"/>
+    <circle cx="128" cy="128" r="126" fill="none" stroke="#a000cc" stroke-width="3"/>
+    <text x="128" y="168" text-anchor="middle" font-size="110" font-family="Georgia,serif" font-weight="bold" fill="#cc0011">${initial}</text>
+  </svg>`;
+  const svgBuf = await sharp(Buffer.from(svgAvatar)).jpeg({ quality: 90 }).toBuffer();
+  res.set("Content-Type", "image/jpeg");
+  res.set("Cache-Control", "public, max-age=86400");
+  res.send(svgBuf);
 });
 
 // ── Profile background image ────────────────────────────────────────────────
@@ -109,15 +125,32 @@ router.get("/background", requireAuth, async (req: AuthRequest, res) => {
     res.send(user.profile_background);
     return;
   }
-  // Serve default background
+  // Try file-based default first
   const defaultPath = path.join(ASSETS_DIR, "default_bg.jpg");
   if (existsSync(defaultPath)) {
     res.set("Content-Type", "image/jpeg");
     res.set("Cache-Control", "public, max-age=86400");
     createReadStream(defaultPath).pipe(res);
-  } else {
-    res.status(404).json({ success: false, message: "No background set" });
+    return;
   }
+  // Generate an SVG default background inline — no file dependency
+  const svgBg = `<svg xmlns="http://www.w3.org/2000/svg" width="765" height="425">
+    <defs>
+      <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#050510"/>
+        <stop offset="60%" stop-color="#1a0a2e"/>
+        <stop offset="100%" stop-color="#0a0005"/>
+      </linearGradient>
+    </defs>
+    <rect width="765" height="425" fill="url(#bg)"/>
+    <circle cx="700" cy="80" r="180" fill="rgba(160,0,26,0.06)"/>
+    <circle cx="80" cy="380" r="120" fill="rgba(100,0,180,0.05)"/>
+    <text x="382" y="230" text-anchor="middle" font-size="80" font-family="Georgia,serif" font-weight="bold" fill="rgba(255,255,255,0.04)">反逆</text>
+  </svg>`;
+  const svgBuf = await sharp(Buffer.from(svgBg)).jpeg({ quality: 90 }).toBuffer();
+  res.set("Content-Type", "image/jpeg");
+  res.set("Cache-Control", "public, max-age=86400");
+  res.send(svgBuf);
 });
 
 // ── Upload profile picture ──────────────────────────────────────────────────

@@ -3,6 +3,7 @@ import { ensureGroup, getGroup, isBanned, updateGroup } from "../db/queries.js";
 import { sendText } from "../connection.js";
 import { mentionTag } from "../utils.js";
 import { checkBlacklistedJoin } from "./antispam.js";
+import { logger } from "../../lib/logger.js";
 
 export async function handleGroupUpdate(sock: WASocket, updates: any[]) {
   for (const update of updates) {
@@ -69,14 +70,18 @@ export async function handleGroupParticipantsUpdate(
       if (group.welcome === "on") {
         const template = group.welcome_msg || "Welcome to the group, @mention! 👋";
         const msg = replaceWelcomeMention(template, participant);
-        await sendText(groupId, msg, [participant]).catch(() => {});
+        await sendText(groupId, msg, [participant]).catch((err) => {
+          logger.warn({ err, groupId, participant }, "Failed to send welcome message");
+        });
       }
     } else if (action === "remove" || action === "leave") {
       if (group.leave === "on") {
         const name = mentionTag(participant);
         const template = group.leave_msg || `Goodbye ${name}! 👋`;
         const msg = replaceWelcomeMention(template, participant);
-        await sendText(groupId, msg, [participant]).catch(() => {});
+        await sendText(groupId, msg, [participant]).catch((err) => {
+          logger.warn({ err, groupId, participant }, "Failed to send leave message");
+        });
       }
     }
   }

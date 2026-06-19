@@ -10,11 +10,13 @@ import {
   setBotSetting, getBotSetting, deleteBotSetting,
   deleteUserCardByCopyId, getUserCardByCopyId, getStaff, getMentionName, extractNumberFromJid,
 } from "../db/queries.js";
-import { getTierEmoji, formatNumber, generateId, VIDEO_TIERS } from "../utils.js";
+import { getTierEmoji, formatNumber, generateId, VIDEO_TIERS, isGifBuffer } from "../utils.js";
 import sharp from "sharp";
 
 export async function handleCards(ctx: CommandContext): Promise<void> {
   const { from, sender, args, command: cmd, msg, sock, resolvedMentions } = ctx;
+  // Canonical DB key — user.id (phone digits), not raw sender which may be @lid
+  const userId = getUser(sender.split("@")[0].split(":")[0])?.id || sender.split("@")[0].split(":")[0];
 
   if (cmd === "collection" || cmd === "coll") {
     const target = resolvedMentions[0] || sender;
@@ -36,7 +38,7 @@ export async function handleCards(ctx: CommandContext): Promise<void> {
 
   if (cmd === "card") {
     const idx = parseInt(args[0]) - 1;
-    const cards = getUserCards(sender);
+    const cards = getUserCards(userId);
     if (isNaN(idx) || idx < 0 || idx >= cards.length) {
       await sendText(from, `❌ Invalid card index. You have ${cards.length} cards.`);
       return;
@@ -60,6 +62,8 @@ export async function handleCards(ctx: CommandContext): Promise<void> {
 
   if (cmd === "cardinfo" || cmd === "ci") {
     if (args.length === 0) { await sendText(from, "❌ Usage: .ci <card name> [tier]"); return; }
+    // ⌛ instant reaction — card image generation can take a moment
+    await sock.sendMessage(from, { react: { text: "⌛", key: msg.key } }).catch(() => {});
 
     // Tier map: "1"→"T1" ... "6"→"T6", "s"→"TS", "x"→"TX", "z"→"TZ"
     const tierMap: Record<string, string> = {
@@ -115,7 +119,7 @@ export async function handleCards(ctx: CommandContext): Promise<void> {
         `✦────⋆⋅✧⋅⋆────✦\n\n` +
         `${ownersSection}\n\n` +
         `∘₊✦────────✦₊∘`;
-      if (VIDEO_TIERS.has(found.tier)) {
+      if (VIDEO_TIERS.has(found.tier) && !isGifBuffer(buf)) {
         await sock.sendMessage(from, { video: buf, gifPlayback: true, mimetype: "video/mp4", caption, mentions: ownerMentions });
       } else {
         await sock.sendMessage(from, { image: buf, caption, mentions: ownerMentions });
@@ -124,7 +128,13 @@ export async function handleCards(ctx: CommandContext): Promise<void> {
       for (let i = 0; i < matches.length; i++) {
         const c = matches[i];
         const owners = getCardOwners(c.id);
-        const buf = await getCardImageBuffer(c);
+        let buf: Buffer;
+        try {
+          buf = await getCardImageBuffer(c);
+        } catch {
+          await sendText(from, `⚠️ Could not load image for *${c.name}* (${c.tier}) — skipping.`);
+          continue;
+        }
         const ownerMentions: string[] = [];
         let ownersSection = "_⛔ No owners yet_";
         if (owners.length > 0) {
@@ -146,7 +156,7 @@ export async function handleCards(ctx: CommandContext): Promise<void> {
           `𝗧𝗼𝘁𝗮𝗹 𝗜𝘀𝘀𝘂𝗲𝘀: ${owners.length}\n\n` +
           `👥 𝗢𝗪𝗡𝗘𝗥𝗦\n${ownersSection}\n\n` +
           `∘₊✦────────✦₊∘`;
-        if (VIDEO_TIERS.has(c.tier)) {
+        if (VIDEO_TIERS.has(c.tier) && !isGifBuffer(buf)) {
           await sock.sendMessage(from, { video: buf, gifPlayback: true, mimetype: "video/mp4", caption, mentions: ownerMentions });
         } else {
           await sock.sendMessage(from, { image: buf, caption, mentions: ownerMentions });
@@ -157,7 +167,7 @@ export async function handleCards(ctx: CommandContext): Promise<void> {
   }
 
   if (cmd === "mycollectionseries" || cmd === "mycolls") {
-    const cards = getUserCards(sender);
+    const cards = getUserCards(userId);
     const series: Record<string, number> = {};
     for (const c of cards) {
       series[c.series] = (series[c.series] || 0) + 1;
@@ -198,7 +208,7 @@ export async function handleCards(ctx: CommandContext): Promise<void> {
   if (cmd === "sc") {
     const searchName = args.join(" ");
     if (!searchName) { await sendText(from, "❌ Usage: .sc <card name>"); return; }
-    const myCards = getUserCards(sender);
+    const myCards = getUserCards(userId);
     const found = myCards.filter((c) =>
       c.name.toLowerCase().includes(searchName.toLowerCase())
     );
@@ -255,7 +265,7 @@ export async function handleCards(ctx: CommandContext): Promise<void> {
   }
 
   if (cmd === "stardust") {
-    const cards = getUserCards(sender);
+    const cards = getUserCards(userId);
     const tierDustMap: Record<string, number> = {"T1":5,"T2":10,"T3":25,"T4":50,"T5":100,"TS":250,"TX":500};
     const dust = cards.reduce((acc, c) => acc + (tierDustMap[c.tier] || 5), 0);
     await sendText(from, `✨ Your stardust value: *${dust} SD*\n(Based on ${cards.length} cards)`);
@@ -312,7 +322,7 @@ export async function handleCards(ctx: CommandContext): Promise<void> {
   if (cmd === "si") {
     const query = args.join(" ").toLowerCase();
     if (!query) { await sendText(from, "❌ Usage: .si <name>"); return; }
-    const cards = getUserCards(sender);
+    const cards = getUserCards(userId);
     const matches = cards.filter((c) => c.name.toLowerCase().includes(query));
     if (matches.length === 0) { await sendText(from, `❌ No cards matching "${args.join(" ")}".`); return; }
     const shown = matches.slice(0, 20);
@@ -381,7 +391,7 @@ export async function handleCards(ctx: CommandContext): Promise<void> {
 
   // .tier — show owned cards grouped by tier
   if (cmd === "tier") {
-    const cards = getUserCards(sender);
+    const cards = getUserCards(userId);
     if (cards.length === 0) { await sendText(from, "🎴 You have no cards."); return; }
     const groups: Record<string, string[]> = {};
     for (const c of cards) {
@@ -403,7 +413,7 @@ export async function handleCards(ctx: CommandContext): Promise<void> {
   // .myseries — show all unique series in user collection
   if (cmd === "myseries") {
     const phoneNormalized = extractNumberFromJid(sender);
-    const cards = getUserCards(sender);
+    const cards = getUserCards(userId);
     if (cards.length === 0) { await sendText(from, "🎴 You have no cards."); return; }
     const db = (await import("../db/database.js")).getDb();
     const seriesRows = db.prepare(`
@@ -423,7 +433,7 @@ export async function handleCards(ctx: CommandContext): Promise<void> {
   if (cmd === "cs") {
     const seriesName = args.join(" ");
     if (!seriesName) { await sendText(from, "❌ Usage: .cs <series name>"); return; }
-    const cards = getUserCards(sender);
+    const cards = getUserCards(userId);
     const found = cards.filter((c) =>
       (c.series || "General").toLowerCase().includes(seriesName.toLowerCase())
     );
@@ -550,7 +560,7 @@ export async function handleCards(ctx: CommandContext): Promise<void> {
     const numArg = args.find((a) => /^\d+$/.test(a));
     const cardNum = numArg ? parseInt(numArg) : NaN;
     if (!mentioned || isNaN(cardNum)) { await sendText(from, "❌ Usage: .cg @user [card #]  or reply to a user's message with .cg [card #]"); return; }
-    const cards = getUserCards(sender);
+    const cards = getUserCards(userId);
     if (cardNum < 1 || cardNum > cards.length) { await sendText(from, `❌ Invalid card number. You have ${cards.length} cards.`); return; }
     const card = cards[cardNum - 1];
     ensureUser(mentioned);
@@ -577,7 +587,7 @@ export async function handleCards(ctx: CommandContext): Promise<void> {
     }
     const cardNum = parseInt(args[0]);
     if (isNaN(cardNum)) { await sendText(from, "❌ Usage: .ctd [card #]"); return; }
-    const cards = getUserCards(sender);
+    const cards = getUserCards(userId);
     if (cardNum < 1 || cardNum > cards.length) { await sendText(from, "❌ Invalid card number."); return; }
     const card = cards[cardNum - 1];
     const deck = getDeck(sender);
@@ -609,7 +619,7 @@ export async function handleCards(ctx: CommandContext): Promise<void> {
     const mentioned = resolvedMentions[0];
     const cardNum = parseInt(args[1] || args[0]);
     if (!mentioned || isNaN(cardNum)) { await sendText(from, "❌ Usage: .lc @user [card #]"); return; }
-    const cards = getUserCards(sender);
+    const cards = getUserCards(userId);
     if (cardNum < 1 || cardNum > cards.length) { await sendText(from, "❌ Invalid card number."); return; }
     const card = cards[cardNum - 1];
     lendCard(card.user_card_id, mentioned);
@@ -643,7 +653,7 @@ export async function handleCards(ctx: CommandContext): Promise<void> {
       await sendText(from, "❌ Usage: .sellc @user [card #] [price]");
       return;
     }
-    const cards = getUserCards(sender);
+    const cards = getUserCards(userId);
     if (cardNum < 1 || cardNum > cards.length) { await sendText(from, "❌ Invalid card number."); return; }
     const card = cards[cardNum - 1];
     const offerId = createSellOffer(sender, mentioned, card.user_card_id, price);
@@ -662,7 +672,7 @@ export async function handleCards(ctx: CommandContext): Promise<void> {
     const myCardNum = parseInt(args[0]);
     const theirCardNum = parseInt(args[1]);
     if (isNaN(myCardNum) || isNaN(theirCardNum)) { await sendText(from, "❌ Usage: .tc [your card #] [their card #] (reply to their message)"); return; }
-    const myCards = getUserCards(sender);
+    const myCards = getUserCards(userId);
     const theirCards = getUserCards(recipient);
     if (myCardNum < 1 || myCardNum > myCards.length) { await sendText(from, "❌ Invalid card number."); return; }
     if (theirCardNum < 1 || theirCardNum > theirCards.length) { await sendText(from, "❌ They don't have that card."); return; }

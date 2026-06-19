@@ -1,6 +1,6 @@
 import type { CommandContext } from "./index.js";
 import { sendText } from "../connection.js";
-import { getSummerTokens, addSummerTokens, setSummerTokens, getTopSummerTokens } from "../db/queries.js";
+import { getSummerTokens, addSummerTokens, setSummerTokens, getTopSummerTokens, getUser } from "../db/queries.js";
 import { formatNumber } from "../utils.js";
 
 const SUMMER_SHOP: Array<{ name: string; cost: number; description: string }> = [
@@ -13,7 +13,9 @@ const SUMMER_SHOP: Array<{ name: string; cost: number; description: string }> = 
 
 export async function handleSummer(ctx: CommandContext): Promise<void> {
   const { from, sender, args, command: cmd } = ctx;
-  const tokens = getSummerTokens(sender);
+  // Canonical DB key — user.id (phone), not raw sender which may be @lid
+  const userId = getUser(sender.split("@")[0].split(":")[0])?.id || sender.split("@")[0].split(":")[0];
+  const tokens = getSummerTokens(userId);
 
   if (cmd === "summer") {
     await sendText(from,
@@ -60,7 +62,7 @@ export async function handleSummer(ctx: CommandContext): Promise<void> {
       }
       setSummerTokens(sender, tokens - item.cost);
       const { addToInventory } = await import("../db/queries.js");
-      addToInventory(sender, item.name);
+      addToInventory(userId, item.name);
 
       await sendText(from, `✅ Purchased *${item.name}* for ${item.cost} tokens!`);
       return;

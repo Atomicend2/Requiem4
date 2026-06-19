@@ -131,13 +131,20 @@ export function ensureUser(userId: string, name?: string) {
       "INSERT OR IGNORE INTO users (id, name, balance, bank, display_id) VALUES (?, ?, 0, 0, ?)"
     ).run(phone, name || phone, did);
   } else {
+    // IMPORTANT: existing may have been found via the `lid` fallback inside
+    // getUser() — meaning existing.id is the CANONICAL phone-keyed row id,
+    // which can differ from `phone` (which, for an unresolved @lid sender,
+    // is just the LID digits). All writes below must target existing.id,
+    // never the raw `phone` var, or they silently no-op against a row that
+    // doesn't exist and a ghost LID row never gets updated/merged.
+    const targetId = existing.id;
     if (!existing.display_id) {
       const did = generateDisplayId();
-      db.prepare("UPDATE users SET display_id = ? WHERE id = ? AND (display_id IS NULL OR display_id = '')").run(did, phone);
+      db.prepare("UPDATE users SET display_id = ? WHERE id = ? AND (display_id IS NULL OR display_id = '')").run(did, targetId);
     }
     // Update name from pushName when we have a real name and the stored one is missing or was defaulted to the phone number
-    if (name && name !== phone && (!existing.name || existing.name === phone)) {
-      db.prepare("UPDATE users SET name = ? WHERE id = ?").run(name, phone);
+    if (name && name !== targetId && (!existing.name || existing.name === targetId || existing.name === phone)) {
+      db.prepare("UPDATE users SET name = ? WHERE id = ?").run(name, targetId);
     }
   }
   return getUser(phone);

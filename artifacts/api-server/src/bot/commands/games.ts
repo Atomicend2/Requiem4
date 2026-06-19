@@ -162,6 +162,9 @@ function unoCardPoints(card: string): number {
 
 export async function handleGames(ctx: CommandContext): Promise<void> {
   const { from, sender, args, command: cmd, msg, sock, resolvedMentions } = ctx;
+  // Canonical DB key — resolves @lid to phone via getUser lid-fallback
+  const { getUser: _getUser } = await import("../db/queries.js");
+  const userId = _getUser(sender.split("@")[0].split(":")[0])?.id || sender.split("@")[0].split(":")[0];
   const db = getDb();
 
   if (cmd === "tictactoe" || cmd === "ttt") {
@@ -643,7 +646,7 @@ export async function handleGames(ctx: CommandContext): Promise<void> {
     const challenged = resolvedMentions[0];
     if (!challenged) { await sendText(from, "❌ Mention someone to battle!"); return; }
     const { ensureRpg } = await import("../db/queries.js");
-    const p1 = ensureRpg(sender);
+    const p1 = ensureRpg(userId);
     const p2 = ensureRpg(challenged);
     const damage = (atk: number, def: number) => Math.max(1, atk - Math.floor(def * 0.5) + Math.floor(Math.random() * 20) - 10);
     let p1hp = p1.hp, p2hp = p2.hp;

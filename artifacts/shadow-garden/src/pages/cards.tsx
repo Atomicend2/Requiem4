@@ -1,11 +1,11 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useGetMyCards, useAddCardToWishlist } from "@workspace/api-client-react/src/generated/api";
 import { useAuth } from "@/lib/auth";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
-import { Search, Heart, CreditCard, Lock, Flame, Gavel, Sparkles, Star, ImageOff, Users, AlertCircle, RefreshCw, ChevronLeft, ChevronRight } from "lucide-react";
+import { Search, Heart, CreditCard, Lock, Flame, Gavel, Sparkles, Star, ImageOff, Users, AlertCircle, RefreshCw, ChevronLeft, ChevronRight, X, Layers, Copy } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 
@@ -22,7 +22,6 @@ const TIER_CONFIG: Record<string, { label: string; bg: string; text: string; bor
 
 const CARDS_PER_PAGE = 10;
 
-// Fetches from the /from-json route which reads cards.json directly (always populated)
 async function fetchCardsFromJson(params: { page: number; tier?: string; search?: string }) {
   const url = new URL("/api/v1/cards/from-json", window.location.origin);
   url.searchParams.set("page", String(params.page));
@@ -34,6 +33,12 @@ async function fetchCardsFromJson(params: { page: number; tier?: string; search?
   return res.json();
 }
 
+async function fetchCardDetail(cardId: string): Promise<any> {
+  const res = await fetch(`/api/v1/cards/detail/${encodeURIComponent(cardId)}`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
 export default function Cards() {
   const { isAuthenticated, user } = useAuth();
   const [tierFilter, setTierFilter] = useState<string>("all");
@@ -41,17 +46,15 @@ export default function Cards() {
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [page, setPage] = useState(1);
   const { toast } = useToast();
+  const [selectedCard, setSelectedCard] = useState<any | null>(null);
 
-  // Debounce search input
   useEffect(() => {
     const t = setTimeout(() => { setDebouncedSearch(search); setPage(1); }, 400);
     return () => clearTimeout(t);
   }, [search]);
 
-  // Reset page when filters change
   useEffect(() => { setPage(1); }, [tierFilter]);
 
-  // Fetch from cards.json directly — always available, no DB dependency
   const [allCardsData, setAllCardsData] = useState<{ cards: any[]; total: number; pages: number } | null>(null);
   const [loadingAll, setLoadingAll] = useState(true);
   const [allCardsError, setAllCardsError] = useState<Error | null>(null);
@@ -79,6 +82,10 @@ export default function Cards() {
 
   return (
     <div className="min-h-screen p-4 md:p-8 max-w-7xl mx-auto">
+      {selectedCard && (
+        <CardModal card={selectedCard} onClose={() => setSelectedCard(null)} />
+      )}
+
       {/* Header */}
       <div className="mb-10">
         <p className="text-primary/40 font-mono tracking-[0.4em] text-xs uppercase mb-1">反逆</p>
@@ -140,9 +147,10 @@ export default function Cards() {
           ) : allCardsData && allCardsData.cards.length > 0 ? (
             <>
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
-                {allCardsData.cards.map((card: any) => <CardDisplay key={card.id || card.shoob_id} card={card} />)}
+                {allCardsData.cards.map((card: any) => (
+                  <CardDisplay key={card.id || card.shoob_id} card={card} onOpen={setSelectedCard} />
+                ))}
               </div>
-              {/* Pagination */}
               {allCardsData.pages > 1 && (
                 <div className="flex items-center justify-center gap-3 mt-8">
                   <Button
@@ -182,7 +190,9 @@ export default function Cards() {
             </div>
           ) : myCards?.cards && myCards.cards.length > 0 ? (
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
-              {myCards.cards.map((uc: any) => <CardDisplay key={uc.userCardId} card={uc.card} showOwned />)}
+              {myCards.cards.map((uc: any) => (
+                <CardDisplay key={uc.userCardId} card={uc.card} showOwned onOpen={setSelectedCard} />
+              ))}
             </div>
           ) : (
             <Empty icon={<CreditCard className="w-8 h-8 text-muted-foreground" />} text="No cards collected yet. Use bot commands to claim spawned cards." />
@@ -257,12 +267,12 @@ export default function Cards() {
   );
 }
 
-function CardDisplay({ card, showOwned }: { card: any; showOwned?: boolean }) {
+function CardModal({ card, onClose }: { card: any; onClose: () => void }) {
+  const cfg = TIER_CONFIG[card.tier] || TIER_CONFIG["T1"];
+  const [detail, setDetail] = useState<any | null>(null);
+  const [loading, setLoading] = useState(true);
   const { toast } = useToast();
   const { isAuthenticated } = useAuth();
-  const cfg = TIER_CONFIG[card.tier] || TIER_CONFIG["T1"];
-  const [imgLoaded, setImgLoaded] = useState(false);
-  const [imgError, setImgError] = useState(false);
 
   const wishlistMutation = useAddCardToWishlist({
     mutation: {
@@ -271,18 +281,172 @@ function CardDisplay({ card, showOwned }: { card: any; showOwned?: boolean }) {
     },
   });
 
-  const handleWishlist = () => {
-    if (!isAuthenticated) {
-      toast({ title: "Login Required", description: "You must be logged in.", variant: "destructive" });
-      return;
-    }
-    wishlistMutation.mutate({ data: { cardId: card.id } });
-  };
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetchCardDetail(card.id || card.shoob_id).then((d) => {
+      if (!cancelled) { setDetail(d); setLoading(false); }
+    }).catch(() => {
+      if (!cancelled) setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [card.id, card.shoob_id]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const owners: any[] = detail?.owners ?? card.owners ?? [];
+  const totalCopies: number = detail?.totalCopies ?? card.totalCopies ?? 0;
+  const imageUrl: string = detail?.imageUrl ?? card.imageUrl ?? "";
+  const description: string = detail?.description ?? card.description ?? "";
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200"
+      onClick={onClose}
+    >
+      <div
+        className={cn(
+          "relative w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-2xl border bg-[#07070f] shadow-2xl animate-in zoom-in-95 duration-200",
+          cfg.border
+        )}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Close button */}
+        <button
+          onClick={onClose}
+          className="absolute top-4 right-4 z-10 w-8 h-8 rounded-full bg-black/60 border border-white/10 flex items-center justify-center text-muted-foreground hover:text-white transition-colors"
+        >
+          <X className="w-4 h-4" />
+        </button>
+
+        {/* Full-size image */}
+        <div className={cn("relative w-full overflow-hidden rounded-t-2xl", cfg.bg)} style={{ minHeight: 280 }}>
+          {imageUrl ? (
+            <img
+              src={imageUrl}
+              alt={card.name}
+              className="w-full object-contain max-h-[400px]"
+            />
+          ) : (
+            <div className="flex items-center justify-center h-64 opacity-30">
+              <ImageOff className="w-12 h-12" />
+            </div>
+          )}
+          {/* Gradient overlay */}
+          <div className="absolute inset-x-0 bottom-0 h-1/3 bg-gradient-to-t from-[#07070f] to-transparent" />
+          {/* Tier badge */}
+          <div className={cn("absolute top-3 left-3 px-3 py-1 rounded-full font-bold text-sm border font-mono", cfg.bg, cfg.text, cfg.border)}>
+            {card.tier} — {cfg.label}
+          </div>
+        </div>
+
+        {/* Content */}
+        <div className="p-6 space-y-5">
+          {/* Name + Series */}
+          <div>
+            <h2 className="font-serif text-2xl font-bold text-white leading-tight">{card.name}</h2>
+            <p className="text-sm text-muted-foreground mt-1">{card.series || "General"}</p>
+          </div>
+
+          {/* Card ID + copy count stats */}
+          <div className="grid grid-cols-2 gap-3">
+            <div className="bg-black/40 rounded-lg p-3 border border-white/5">
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1 flex items-center gap-1">
+                <Copy className="w-3 h-3" /> Card ID
+              </p>
+              <p className="text-sm font-mono text-white truncate">{card.id || card.shoob_id || "—"}</p>
+            </div>
+            <div className="bg-black/40 rounded-lg p-3 border border-white/5">
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1 flex items-center gap-1">
+                <Layers className="w-3 h-3" /> Total Issues
+              </p>
+              <p className="text-sm font-bold text-white">{totalCopies.toLocaleString()} in existence</p>
+            </div>
+          </div>
+
+          {/* Description */}
+          {description && (
+            <p className="text-sm text-muted-foreground leading-relaxed border-l-2 border-primary/30 pl-3">{description}</p>
+          )}
+
+          {/* Owners */}
+          <div>
+            <div className="flex items-center gap-2 mb-3">
+              <Users className="w-4 h-4 text-primary" />
+              <h3 className="text-sm font-bold text-white uppercase tracking-wider">
+                {loading ? "Loading owners…" : `Owners (${owners.length}${owners.length >= 5 ? "+" : ""})`}
+              </h3>
+            </div>
+            {loading ? (
+              <div className="space-y-2">
+                {[1,2,3].map(i => <div key={i} className="h-10 bg-white/5 animate-pulse rounded-lg" />)}
+              </div>
+            ) : owners.length === 0 ? (
+              <div className="py-6 text-center text-muted-foreground text-sm border border-white/5 rounded-lg">
+                ⛔ No owners yet — be the first to claim this card in the bot!
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {owners.map((o: any, i: number) => (
+                  <div key={o.id || i} className="flex items-center gap-3 bg-black/30 rounded-lg px-3 py-2 border border-white/5">
+                    <span className="text-xs text-muted-foreground font-mono w-6 text-right shrink-0">#{i + 1}</span>
+                    <div className="w-7 h-7 rounded-full bg-primary/20 border border-primary/30 flex items-center justify-center text-xs font-bold text-primary shrink-0">
+                      {(o.name || "S").charAt(0).toUpperCase()}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm text-white font-medium truncate">{o.name || "Shadow"}</p>
+                      {o.id && <p className="text-[10px] text-muted-foreground font-mono truncate">{o.id}</p>}
+                    </div>
+                  </div>
+                ))}
+                {owners.length >= 5 && !loading && (
+                  <p className="text-center text-xs text-muted-foreground pt-1">Use <span className="font-mono text-primary">.ci {card.name}</span> in the bot to see all owners</p>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Actions */}
+          <div className="pt-2 flex gap-3">
+            <button
+              onClick={() => {
+                if (!isAuthenticated) {
+                  toast({ title: "Login Required", description: "You must be logged in.", variant: "destructive" });
+                  return;
+                }
+                wishlistMutation.mutate({ data: { cardId: card.id || card.shoob_id } });
+              }}
+              disabled={wishlistMutation.isPending || wishlistMutation.isSuccess}
+              className={cn(
+                "flex items-center gap-2 px-4 py-2 rounded-lg border text-sm font-medium transition-all",
+                wishlistMutation.isSuccess
+                  ? "border-rose-500/50 bg-rose-500/10 text-rose-400"
+                  : "border-white/10 bg-black/30 text-muted-foreground hover:border-rose-500/40 hover:text-rose-400 hover:bg-rose-500/5"
+              )}
+            >
+              <Heart className={cn("w-4 h-4", wishlistMutation.isSuccess && "fill-rose-400 text-rose-400")} />
+              {wishlistMutation.isSuccess ? "On Wishlist" : "Add to Wishlist"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CardDisplay({ card, showOwned, onOpen }: { card: any; showOwned?: boolean; onOpen: (card: any) => void }) {
+  const cfg = TIER_CONFIG[card.tier] || TIER_CONFIG["T1"];
+  const [imgLoaded, setImgLoaded] = useState(false);
+  const [imgError, setImgError] = useState(false);
 
   const hasImage = !!card.imageUrl;
 
   return (
-    <div className="relative group">
+    <div className="relative group cursor-pointer" onClick={() => onOpen(card)}>
       <div className={cn(
         "glass-card rounded-xl overflow-hidden border transition-all duration-300 group-hover:-translate-y-2 flex flex-col",
         cfg.border,
@@ -290,7 +454,6 @@ function CardDisplay({ card, showOwned }: { card: any; showOwned?: boolean }) {
       )}>
         {/* Card Image */}
         <div className={cn("relative w-full aspect-[3/4] overflow-hidden", cfg.bg)}>
-          {/* Loading skeleton — shows while image/video is fetching */}
           {hasImage && !imgLoaded && !imgError && (
             <div className="absolute inset-0 animate-pulse bg-white/5 flex items-center justify-center">
               <div className="w-8 h-8 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
@@ -298,8 +461,6 @@ function CardDisplay({ card, showOwned }: { card: any; showOwned?: boolean }) {
           )}
 
           {hasImage && !imgError ? (
-            // All cards — static and animated — use <img>.
-            // Shoob serves GIFs (not real webm) so <img> animates them automatically.
             <img
               src={card.imageUrl}
               alt={card.name}
@@ -338,7 +499,13 @@ function CardDisplay({ card, showOwned }: { card: any; showOwned?: boolean }) {
             </div>
           )}
 
-          {/* Gradient overlay at bottom */}
+          {/* Tap to view hint */}
+          <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors duration-300 flex items-center justify-center opacity-0 group-hover:opacity-100">
+            <span className="text-xs text-white/80 bg-black/60 px-3 py-1 rounded-full border border-white/10 backdrop-blur-sm">
+              View Details
+            </span>
+          </div>
+
           <div className="absolute inset-x-0 bottom-0 h-1/3 bg-gradient-to-t from-black/90 to-transparent" />
         </div>
 
@@ -346,7 +513,6 @@ function CardDisplay({ card, showOwned }: { card: any; showOwned?: boolean }) {
         <div className="p-3 bg-black/50">
           <h3 className={cn("font-serif font-bold text-white truncate text-sm mb-0.5")}>{card.name}</h3>
 
-          {/* Owners */}
           {card.owners && card.owners.length > 0 && (
             <div className="flex items-center gap-1 mb-2">
               <Users className="w-3 h-3 text-muted-foreground shrink-0" />
@@ -359,17 +525,7 @@ function CardDisplay({ card, showOwned }: { card: any; showOwned?: boolean }) {
 
           <div className="flex items-center justify-between pt-2 border-t border-white/5">
             <span className="text-[10px] text-muted-foreground">{card.totalCopies ?? 0} in existence</span>
-            <button
-              onClick={handleWishlist}
-              disabled={wishlistMutation.isPending}
-              className={cn(
-                "transition-colors",
-                wishlistMutation.isPending ? "opacity-50" : "hover:text-rose-400"
-              )}
-              title="Add to Wishlist"
-            >
-              <Heart className={cn("w-4 h-4", wishlistMutation.isSuccess && "text-rose-400 fill-rose-400")} />
-            </button>
+            <span className="text-[10px] text-primary/60 font-mono">tap to view</span>
           </div>
         </div>
       </div>
@@ -403,19 +559,6 @@ function ErrorState({ icon, text }: { icon?: React.ReactNode; text: string }) {
     <div className="py-20 text-center glass-card rounded-xl border border-red-500/20 bg-red-500/5 flex flex-col items-center gap-4">
       {icon && <div className="w-16 h-16 rounded-full bg-red-500/10 border border-red-500/20 flex items-center justify-center">{icon}</div>}
       <p className="text-red-400/80 max-w-md">{text}</p>
-    </div>
-  );
-}
-
-function EmptyStateWithAction({ icon, title, text, action }: { icon?: React.ReactNode; title: string; text: string; action: string }) {
-  return (
-    <div className="py-20 text-center glass-card rounded-xl border border-amber-500/20 bg-amber-500/5 flex flex-col items-center gap-4">
-      {icon && <div className="w-16 h-16 rounded-full bg-amber-500/10 border border-amber-500/20 flex items-center justify-center">{icon}</div>}
-      <div>
-        <h3 className="text-amber-400 font-bold text-lg mb-1">{title}</h3>
-        <p className="text-muted-foreground max-w-md">{text}</p>
-        <p className="text-amber-400/70 text-sm mt-3">{action}</p>
-      </div>
     </div>
   );
 }

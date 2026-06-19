@@ -139,8 +139,10 @@ export async function handleRpg(ctx: CommandContext): Promise<void> {
     return;
   }
 
-  const rpg = ensureRpg(sender);
   const user = getUser(sender);
+  // Canonical DB key — user.id (phone), not raw sender which may be @lid
+  const userId = user?.id || sender.split("@")[0].split(":")[0];
+  const rpg = ensureRpg(userId);
   const now = Math.floor(Date.now() / 1000);
 
   const DUNGEON_MOVES = ["attack", "heavy", "defend", "special", "item", "flee", "explore", "rest"];
@@ -442,7 +444,7 @@ async function processDungeonMove(ctx: CommandContext, battle: DungeonBattle, rp
     battle.healCooldown = 3;
     resultLines.push(`🧪 You recovered *${healAmt} HP*! (3-turn cooldown)`);
   } else if (cmd === "item") {
-    const inv = getInventory(sender);
+    const inv = getInventory(userId);
     const potion = inv.find((i: any) =>
       i.item.toLowerCase().includes("potion") || i.item.toLowerCase().includes("elixir")
     );
@@ -453,7 +455,7 @@ async function processDungeonMove(ctx: CommandContext, battle: DungeonBattle, rp
     const healFull = potion.item.toLowerCase().includes("elixir");
     const healAmt = healFull ? battle.playerMaxHp - battle.playerHp : 50;
     battle.playerHp = Math.min(battle.playerMaxHp, battle.playerHp + healAmt);
-    removeFromInventory(sender, potion.item);
+    removeFromInventory(userId, potion.item);
     resultLines.push(`🎒 Used *${potion.item}* — recovered *${healAmt} HP*!`);
   } else if (cmd === "flee") {
     if (Math.random() < 0.45) {
@@ -482,7 +484,7 @@ async function processDungeonMove(ctx: CommandContext, battle: DungeonBattle, rp
     resultLines.push(`👾 *${battle.enemyName}* strikes back for *${dmg} damage*!`);
   }
 
-  const rpgFresh = ensureRpg(sender);
+  const rpgFresh = ensureRpg(userId);
 
   if (battle.enemyHp <= 0) {
     const xp = battle.floor * 80;
@@ -497,7 +499,7 @@ async function processDungeonMove(ctx: CommandContext, battle: DungeonBattle, rp
       skill_points: (rpgFresh.skill_points || 0) + skillPts,
     });
     updateUser(sender, { balance: (user?.balance || 0) + reward });
-    addToInventory(sender, "Dungeon Key");
+    addToInventory(userId, "Dungeon Key");
     checkLevelUp(sender, rpgFresh.xp + xp, rpgFresh.level);
     activeDungeonBattles.delete(sender);
     const victoryMsg =
