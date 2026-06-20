@@ -46,8 +46,11 @@ export default function Profile() {
 
   // Cache-busters live here (in the root component) so the header
   // avatar/banner and the AppearanceTab edit panel both refresh together.
-  const [ppCacheBust, setPpCacheBust] = useState<number>(0);
-  const [bgCacheBust, setBgCacheBust] = useState<number>(0);
+  // Initialise to Date.now() so the image is always fetched fresh on mount /
+  // page refresh — a value of 0 caused the hook to skip the fetch on first
+  // render because 0 is falsy in the ?t=0 query string path.
+  const [ppCacheBust, setPpCacheBust] = useState<number>(() => Date.now());
+  const [bgCacheBust, setBgCacheBust] = useState<number>(() => Date.now());
 
   if (!isAuthenticated) {
     setLocation("/login");
@@ -60,6 +63,13 @@ export default function Profile() {
 
   const avatarUrl = useAuthMedia("/api/v1/user/avatar", token, ppCacheBust);
   const bgUrl = useAuthMedia("/api/v1/user/background", token, bgCacheBust);
+  // Frame — fetched separately so it re-renders when equipped/removed
+  const { data: myFrameData } = useQuery({
+    queryKey: ["my-frame"],
+    queryFn: () => customFetch<{ success: boolean; frame: any }>("/api/v1/frames/me"),
+    enabled: !!token,
+  });
+  const equippedFrameId: number | null = myFrameData?.frame?.id ?? null;
 
   const progressPercentage = stats ? (stats.profile.xp / stats.xpNeeded) * 100 : 0;
 
@@ -87,18 +97,30 @@ export default function Profile() {
           <div className="absolute top-0 right-0 w-64 h-64 bg-primary/5 rounded-full blur-3xl -translate-y-1/2 translate-x-1/4" />
 
         <div className="relative z-10 flex flex-col md:flex-row items-center md:items-start gap-6">
-          {/* Avatar - pulled up to overlap the banner */}
-          <div className="-mt-20 md:-mt-24 shrink-0 ring-4 ring-black rounded-full">
+          {/* Avatar + frame ring - pulled up to overlap the banner */}
+          <div className="-mt-20 md:-mt-24 shrink-0 relative">
+            {/* Outer glow shadow ring */}
+            <div className="absolute inset-0 rounded-full shadow-[0_0_32px_6px_rgba(160,0,26,0.45)] pointer-events-none z-10" />
+            {/* Profile picture */}
             {avatarUrl ? (
               <img
                 src={avatarUrl}
                 alt="avatar"
-                className="w-24 h-24 md:w-32 md:h-32 rounded-full object-cover border-2 border-primary shadow-[0_0_20px_rgba(160,0,26,0.5)]"
+                className="w-24 h-24 md:w-32 md:h-32 rounded-full object-cover border-4 border-black"
               />
             ) : (
-              <div className="w-24 h-24 md:w-32 md:h-32 rounded-full bg-black border-2 border-primary shadow-[0_0_20px_rgba(160,0,26,0.4)] flex items-center justify-center text-4xl md:text-5xl font-serif text-primary">
+              <div className="w-24 h-24 md:w-32 md:h-32 rounded-full bg-black border-4 border-black flex items-center justify-center text-4xl md:text-5xl font-serif text-primary">
                 {stats?.profile.name?.charAt(0).toUpperCase() ?? "?"}
               </div>
+            )}
+            {/* Frame ring overlaid on top of the avatar — always rendered if equipped */}
+            {equippedFrameId !== null && (
+              <img
+                src={`/api/v1/frames/${equippedFrameId}/image`}
+                alt="frame"
+                className="absolute inset-0 w-full h-full object-contain pointer-events-none z-20 rounded-full"
+                style={{ filter: "drop-shadow(0 0 6px rgba(160,0,26,0.6))" }}
+              />
             )}
           </div>
           

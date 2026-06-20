@@ -4,6 +4,7 @@ import { sendText } from "../connection.js";
 import { mentionTag } from "../utils.js";
 import { checkBlacklistedJoin } from "./antispam.js";
 import { logger } from "../../lib/logger.js";
+import { generateWelcomeCard } from "./welcomecard.js";
 
 export async function handleGroupUpdate(sock: WASocket, updates: any[]) {
   for (const update of updates) {
@@ -56,8 +57,7 @@ export async function handleGroupParticipantsUpdate(
       if (blocked) continue;
 
       // Only flag explicit bot accounts (.bot@ pattern). @lid is how newer
-      // WhatsApp clients appear and should NEVER be treated as a bot — we
-      // already resolved the real JID above.
+      // WhatsApp clients appear and should NEVER be treated as a bot.
       const isLikelyBot = rawParticipant.includes(".bot@");
       if (isLikelyBot && (group.anti_bot || "off") === "on") {
         try {
@@ -67,21 +67,75 @@ export async function handleGroupParticipantsUpdate(
         updateGroup(groupId, { cards_enabled: "off", spawn_enabled: "off" });
         continue;
       }
+
       if (group.welcome === "on") {
-        const template = group.welcome_msg || "Welcome to the group, @mention! 👋";
-        const msg = replaceWelcomeMention(template, participant);
-        await sendText(groupId, msg, [participant]).catch((err) => {
-          logger.warn({ err, groupId, participant }, "Failed to send welcome message");
+        const template = group.welcome_msg || "Welcome to the group, @user! 👋";
+        const memberCount = (groupMeta?.participants?.length ?? 0) || undefined;
+        const pushName = groupMeta?.participants?.find((p: any) => p.id === participant)?.name || undefined;
+        const displayName = pushName || participant.split("@")[0].split(":")[0];
+
+        // ── Try to build and send a welcome image card ───────────────────────
+        const card = await generateWelcomeCard({
+          sock,
+          type: "welcome",
+          participantJid: participant,
+          participantName: displayName,
+          groupName: groupMeta?.subject || "the group",
+          memberCount,
+        }).catch((err) => {
+          logger.warn({ err, groupId, participant }, "Welcome card render failed");
+          return null;
         });
+
+        const msg = replaceWelcomeMention(template, participant);
+
+        if (card) {
+          await sock.sendMessage(groupId, {
+            image: card,
+            caption: msg,
+            mentions: [participant],
+          }).catch((err) => logger.warn({ err, groupId }, "Failed to send welcome card"));
+        } else {
+          // Fallback: plain text welcome
+          await sendText(groupId, msg, [participant]).catch((err) => {
+            logger.warn({ err, groupId, participant }, "Failed to send welcome text");
+          });
+        }
       }
     } else if (action === "remove" || action === "leave") {
       if (group.leave === "on") {
-        const name = mentionTag(participant);
-        const template = group.leave_msg || `Goodbye ${name}! 👋`;
-        const msg = replaceWelcomeMention(template, participant);
-        await sendText(groupId, msg, [participant]).catch((err) => {
-          logger.warn({ err, groupId, participant }, "Failed to send leave message");
+        const pushName = groupMeta?.participants?.find((p: any) => p.id === participant)?.name || undefined;
+        const displayName = pushName || participant.split("@")[0].split(":")[0];
+        const memberCount = Math.max(0, (groupMeta?.participants?.length ?? 1) - 1) || undefined;
+        const template = group.leave_msg || `Goodbye @user! 👋`;
+
+        // ── Try to build and send a goodbye image card ───────────────────────
+        const card = await generateWelcomeCard({
+          sock,
+          type: "goodbye",
+          participantJid: participant,
+          participantName: displayName,
+          groupName: groupMeta?.subject || "the group",
+          memberCount,
+        }).catch((err) => {
+          logger.warn({ err, groupId, participant }, "Goodbye card render failed");
+          return null;
         });
+
+        const msg = replaceWelcomeMention(template, participant);
+
+        if (card) {
+          await sock.sendMessage(groupId, {
+            image: card,
+            caption: msg,
+            mentions: [participant],
+          }).catch((err) => logger.warn({ err, groupId }, "Failed to send goodbye card"));
+        } else {
+          // Fallback: plain text goodbye
+          await sendText(groupId, msg, [participant]).catch((err) => {
+            logger.warn({ err, groupId, participant }, "Failed to send goodbye text");
+          });
+        }
       }
     }
   }

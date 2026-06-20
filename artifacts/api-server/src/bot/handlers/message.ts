@@ -605,8 +605,9 @@ async function dispatch(ctx: CommandContext): Promise<void> {
     case "ping":
     case "test":
     case "alive":
-      // ⌛ reaction on the triggering message so the user gets instant feedback
-      await sock.sendMessage(from, { react: { text: "⌛", key: msg.key } }).catch(() => {});
+      // ⌛ reaction on the triggering message so the user gets instant feedback.
+      // Must use ctx.sock here — bare `sock` is not in scope inside dispatch().
+      await ctx.sock.sendMessage(from, { react: { text: "⌛", key: msg.key } }).catch(() => {});
       await sendText(from, `🌌 *${getBotName()}* — 反逆 Online\n> ${getPingMs(msg)}ms`);
       return;
 

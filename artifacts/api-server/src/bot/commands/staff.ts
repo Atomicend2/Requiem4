@@ -328,10 +328,52 @@ export async function handleStaff(ctx: CommandContext): Promise<void> {
       return;
     }
     try {
+      // First fetch invite info to get the group JID — this also validates the code
+      // and avoids account_reachout_restricted errors that happen on blind accepts.
+      let groupId: string | undefined;
+      try {
+        const info = await sock.groupGetInviteInfo(code);
+        groupId = info?.id;
+      } catch {
+        // getInviteInfo may not be available on all Baileys versions — fall through
+      }
+      if (groupId) {
+        // If the bot is already in the group, skip the join
+        const existing = await sock.groupMetadata(groupId).catch(() => null);
+        if (existing) {
+          await sendText(from, `✅ Bot is already in *${existing.subject}*.`);
+          return;
+        }
+      }
       await sock.groupAcceptInvite(code);
       await sendText(from, `✅ Bot has joined the group.`);
     } catch (err: any) {
-      await sendText(from, `❌ Failed to join: ${err?.message || "Unknown error"}`);
+      const msg = err?.message || "Unknown error";
+      // account_reachout_restricted = WA has rate-limited or restricted this bot
+      // account from joining groups via invite link. This is a WhatsApp-level restriction.
+      if (msg.includes("account_reachout_restricted") || msg.includes("reachout_restricted")) {
+        await sendText(from,
+          "❌ WhatsApp is blocking the bot from joining groups via invite link right now.
+
+" +
+          "*Why this happens:*
+" +
+          "• The bot account is being rate-limited or flagged by WhatsApp
+" +
+          "• New/recent bot accounts face this restriction for 24–72 hrs
+
+" +
+          "*Workarounds:*
+" +
+          "1️⃣ Add the bot's number directly as a group participant (you need admin rights)
+" +
+          "2️⃣ Wait 24–72 hours and try again
+" +
+          "3️⃣ Re-register the bot on a number that has sent/received real messages recently"
+        );
+      } else {
+        await sendText(from, `❌ Failed to join: ${msg}`);
+      }
     }
     return;
   }

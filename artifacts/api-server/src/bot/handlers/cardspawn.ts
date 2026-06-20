@@ -9,6 +9,48 @@ import { sendText, sendImage } from "../connection.js";
 import { getTierEmoji, getWeightedRandomCard, formatNumber, VIDEO_TIERS, isGifBuffer } from "../utils.js";
 import { logger } from "../../lib/logger.js";
 import sharp from "sharp";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { tmpdir } from "node:os";
+import { writeFile, readFile, unlink } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * Ensure the buffer is a lightweight mp4.
+ * Accepts GIF, webm, or already-mp4 input.
+ * Falls back to the original buffer if ffmpeg is unavailable or conversion fails.
+ */
+async function ensureMp4(buf: Buffer, cardId?: string | number): Promise<Buffer> {
+  // Already mp4 — check ftyp box magic bytes
+  const isMp4 = buf.length > 8 && buf.slice(4, 8).toString("ascii") === "ftyp";
+  if (isMp4) return buf;
+
+  const inExt = isGifBuffer(buf) ? "gif" : "webm";
+  const inPath  = `${tmpdir()}/card_${cardId ?? randomUUID()}_in.${inExt}`;
+  const outPath = `${tmpdir()}/card_${cardId ?? randomUUID()}_out.mp4`;
+
+  try {
+    await writeFile(inPath, buf);
+    await execFileAsync("ffmpeg", [
+      "-y", "-i", inPath,
+      "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+      "-c:v", "libx264", "-preset", "fast", "-crf", "28",
+      "-movflags", "+faststart",
+      "-an",
+      outPath,
+    ], { timeout: 20_000 });
+    const mp4 = await readFile(outPath);
+    return mp4;
+  } catch (err) {
+    logger.warn({ err, cardId }, "ensureMp4: ffmpeg conversion failed, sending original buffer");
+    return buf;
+  } finally {
+    await unlink(inPath).catch(() => {});
+    await unlink(outPath).catch(() => {});
+  }
+}
 
 const MAX_SPAWNS_PER_DAY = 6;
 const SPAWN_MIN_SECS = 3600;
@@ -132,11 +174,14 @@ export async function spawnCard(sock: WASocket, groupId: string, specific?: stri
 
   try {
     const buf = await getCardImageBuffer(card);
-    if (VIDEO_TIERS.has(card.tier) && !isGifBuffer(buf)) {
+    if (VIDEO_TIERS.has(card.tier)) {
+      // All animated tiers must be sent as mp4 — never as a static image or GIF.
+      // getCardImageBuffer may return a GIF, webm, or already-mp4 buffer; normalise to mp4.
       const { getAnySock } = await import("../connection.js");
       const activeSock = getAnySock();
       if (activeSock) {
-        await activeSock.sendMessage(groupId, { video: buf, gifPlayback: true, mimetype: "video/mp4", caption });
+        const mp4Buf = await ensureMp4(buf, card.id);
+        await activeSock.sendMessage(groupId, { video: mp4Buf, gifPlayback: true, mimetype: "video/mp4", caption });
       } else {
         await sendImage(groupId, buf, caption);
       }
@@ -242,7 +287,12 @@ async function getCardImageBuffer(card: any): Promise<Buffer> {
         const contentType = res.headers.get("content-type") || "";
         const buf = Buffer.from(await res.arrayBuffer());
         logger.debug({ cardId: card.id, size: buf.length, contentType }, "Successfully fetched card image");
-        if (contentType.includes("gif") || contentType.includes("webm") || contentType.includes("video")) {
+        // Return animated buffers as-is — ensureMp4() will convert them to mp4
+        // before sending. Never run sharp on a GIF/webm or it becomes a static JPEG.
+        if (
+          contentType.includes("gif") || contentType.includes("webm") ||
+          contentType.includes("video") || isGifBuffer(buf)
+        ) {
           return buf;
         }
         return sharp(buf).jpeg({ quality: 88 }).toBuffer();

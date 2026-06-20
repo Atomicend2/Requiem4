@@ -1,5 +1,6 @@
 import { Link, useLocation } from "wouter";
 import { useAuth } from "@/lib/auth";
+import { useState, useEffect } from "react";
 import {
   Home, Map, CreditCard, User, ShoppingCart, Shield, Trophy, LogOut, Settings,
 } from "lucide-react";
@@ -15,12 +16,36 @@ const NAV_ITEMS = [
   { href: "/leaderboard", label: "Ranks",      icon: Trophy },
 ];
 
+/** Fetches the auth-gated avatar and returns a local blob URL for use in <img>. */
+function useLayoutAvatar(token: string | null): string | null {
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!token) { setUrl(null); return; }
+    let cancelled = false;
+    fetch(`/api/v1/user/avatar?t=${Date.now()}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(async (res) => {
+        if (!res.ok || cancelled) return;
+        const blob = await res.blob();
+        if (cancelled) return;
+        const objectUrl = URL.createObjectURL(blob);
+        setUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return objectUrl; });
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [token]);
+  return url;
+}
+
 export function AppLayout({ children }: { children: React.ReactNode }) {
   const [location] = useLocation();
-  const { isAuthenticated, user, logout } = useAuth();
+  const { isAuthenticated, user, logout, token } = useAuth();
   const isMod = (user as any)?.isMod === 1 || (user as any)?.isOwner === true;
   const displayName = (user as any)?.name || "";
   const initial = displayName.charAt(0).toUpperCase() || "?";
+  // Fetch the real avatar so sidebar/mobile header show pp instead of initial letter
+  const avatarUrl = useLayoutAvatar(isAuthenticated ? token : null);
 
   return (
     <div className="min-h-[100dvh] flex flex-col md:flex-row bg-background text-foreground">
@@ -87,8 +112,11 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
           {isAuthenticated && user ? (
             <div className="space-y-2">
               <div className="flex items-center gap-3 px-2 py-2">
-                <div className="w-8 h-8 rounded-full bg-violet-600/10 border border-violet-500/20 flex items-center justify-center text-xs font-bold text-violet-400 font-mono shrink-0">
-                  {initial}
+                {/* Show profile picture if loaded, otherwise fall back to initial */}
+                <div className="w-8 h-8 rounded-full bg-violet-600/10 border border-violet-500/20 flex items-center justify-center text-xs font-bold text-violet-400 font-mono shrink-0 overflow-hidden">
+                  {avatarUrl
+                    ? <img src={avatarUrl} alt="avatar" className="w-full h-full object-cover rounded-full" />
+                    : initial}
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-semibold text-white truncate">{displayName}</p>
@@ -131,8 +159,11 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
             </Link>
           )}
           {isAuthenticated ? (
-            <div className="w-7 h-7 rounded-full bg-violet-600/10 border border-violet-500/20 flex items-center justify-center text-xs font-bold text-violet-400 font-mono">
-              {initial}
+            /* Show profile picture in mobile header too */
+            <div className="w-7 h-7 rounded-full bg-violet-600/10 border border-violet-500/20 flex items-center justify-center text-xs font-bold text-violet-400 font-mono overflow-hidden">
+              {avatarUrl
+                ? <img src={avatarUrl} alt="avatar" className="w-full h-full object-cover rounded-full" />
+                : initial}
             </div>
           ) : (
             <Link href="/login">

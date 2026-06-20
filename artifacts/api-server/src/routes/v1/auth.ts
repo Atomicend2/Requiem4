@@ -248,16 +248,18 @@ router.post("/register", async (req, res) => {
     const existingPhone = existing.id.split("@")[0].split(":")[0].replace(/\D/g, "");
     if (existingPhone !== normalized) {
       // Old row had JID or LID as id — rename to plain phone atomically
+      // Also grant the 45,000 signup bonus (balance was 0 from ensureUser)
       db.transaction(() => {
-        db.prepare("UPDATE users SET id = ?, name = ?, phone = ?, lid = COALESCE(lid, ?), registered = 1, registered_at = ? WHERE id = ?")
+        db.prepare("UPDATE users SET id = ?, name = ?, phone = ?, lid = COALESCE(lid, ?), registered = 1, registered_at = ?, balance = CASE WHEN COALESCE(balance, 0) = 0 THEN 45000 ELSE balance + 45000 END WHERE id = ?")
           .run(normalized, trimmedName, normalized, resolvedLid, now, existing.id);
         for (const t of ["rpg_characters", "inventory", "user_cards", "message_counts", "card_deck", "deck_backgrounds", "guild_members", "warnings", "muted_users", "summer_tokens", "afk_users"]) {
           try { db.prepare(`UPDATE OR IGNORE ${t} SET user_id = ? WHERE user_id = ?`).run(normalized, existing.id); } catch {}
         }
       })();
     } else {
+      // Row already has the right phone id — mark registered and grant signup bonus
       db.prepare(
-        "UPDATE users SET name = ?, phone = ?, lid = COALESCE(lid, ?), registered = 1, registered_at = ? WHERE id = ?"
+        "UPDATE users SET name = ?, phone = ?, lid = COALESCE(lid, ?), registered = 1, registered_at = ?, balance = CASE WHEN COALESCE(balance, 0) = 0 THEN 45000 ELSE balance + 45000 END WHERE id = ?"
       ).run(trimmedName, normalized, resolvedLid, now, normalized);
     }
   }

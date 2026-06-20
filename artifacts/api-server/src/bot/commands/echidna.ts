@@ -469,6 +469,11 @@ export function shouldEchidnaRespond(params: {
   // Check for the active persona's name mention — case-insensitive whole-word match
   const nameMatch = (persona?.mentionRegex || /\bechidna\b/i).test(body);
 
+  // When echidna_chat is explicitly "off" for a group, the bot is fully silent —
+  // it won't respond even if @mentioned, replied to, or name-mentioned.
+  // Only echidna_chat === "on" turns it on; anything else (missing value, "off") = silent.
+  if (isGroup && !echidnaChatEnabled) return false;
+
   return isMentioned || nameMatch || isReplyToBot || echidnaChatEnabled;
 }
 
