@@ -353,23 +353,7 @@ export async function handleStaff(ctx: CommandContext): Promise<void> {
       // account from joining groups via invite link. This is a WhatsApp-level restriction.
       if (msg.includes("account_reachout_restricted") || msg.includes("reachout_restricted")) {
         await sendText(from,
-          "❌ WhatsApp is blocking the bot from joining groups via invite link right now.
-
-" +
-          "*Why this happens:*
-" +
-          "• The bot account is being rate-limited or flagged by WhatsApp
-" +
-          "• New/recent bot accounts face this restriction for 24–72 hrs
-
-" +
-          "*Workarounds:*
-" +
-          "1️⃣ Add the bot's number directly as a group participant (you need admin rights)
-" +
-          "2️⃣ Wait 24–72 hours and try again
-" +
-          "3️⃣ Re-register the bot on a number that has sent/received real messages recently"
+          `❌ WhatsApp is blocking the bot from joining groups via invite link right now.\n\n*Why this happens:*\n• The bot account is being rate-limited or flagged by WhatsApp\n• New/recent bot accounts face this restriction for 24–72 hrs\n\n*Workarounds:*\n1️⃣ Add the bot's number directly as a group participant (you need admin rights)\n2️⃣ Wait 24–72 hours and try again\n3️⃣ Re-register the bot on a number that has sent/received real messages recently`
         );
       } else {
         await sendText(from, `❌ Failed to join: ${msg}`);
