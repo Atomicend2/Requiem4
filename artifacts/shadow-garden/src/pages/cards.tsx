@@ -524,7 +524,10 @@ function CardDisplay({ card, showOwned, onOpen }: { card: any; showOwned?: boole
           )}
 
           <div className="flex items-center justify-between pt-2 border-t border-white/5">
-            <span className="text-[10px] text-muted-foreground">{card.totalCopies ?? 0} in existence</span>
+            {card.totalCopies > 0
+              ? <span className="text-[10px] text-muted-foreground">{card.totalCopies.toLocaleString()} in existence</span>
+              : <span className="text-[10px] text-muted-foreground/40 italic">tap to see owners</span>
+            }
             <span className="text-[10px] text-primary/60 font-mono">tap to view</span>
           </div>
         </div>

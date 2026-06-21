@@ -582,11 +582,28 @@ export async function handleEchidnaMessage(
 // ─── .botreply command handler ────────────────────────────────────────────────
 
 export async function handleBotReply(ctx: CommandContext): Promise<void> {
-  const { from, sender, args, sock, msg } = ctx;
+  const { from, sender, args, sock, msg, command } = ctx;
   const persona = getPersona(getPersonaForSock(sock));
 
   if (!isModOrAbove(sender)) {
-    await sendText(from, "❌ Only mods, guardians, and the owner can use `.botreply`.");
+    await sendText(from, "❌ Only mods, guardians, and the owner can use this command.");
+    return;
+  }
+
+  // ── .chatbot on/off — shorthand top-level command
+  if (command === "chatbot") {
+    const val = args[0]?.toLowerCase();
+    if (!from.endsWith("@g.us")) {
+      await sendText(from, "❌ This is a group-only toggle.");
+      return;
+    }
+    const isOn = val === "on";
+    const { updateGroup } = await import("../db/queries.js");
+    updateGroup(from, { echidna_chat: isOn ? "on" : "off" });
+    const statusLine = isOn
+      ? `╔══════════════════════╗\n║  🤖 𝗔𝗨𝗧𝗢-𝗥𝗘𝗣𝗟𝗬  ·  𝗢𝗡  ║\n╚══════════════════════╝\n\n${persona.shortLabel} will now respond to *every message* in this group.`
+      : `╔══════════════════════╗\n║  🔇 𝗔𝗨𝗧𝗢-𝗥𝗘𝗣𝗟𝗬  ·  𝗢𝗙𝗙 ║\n╚══════════════════════╝\n\n${persona.shortLabel} will only respond when *@mentioned* or *replied to*.`;
+    await sendText(from, statusLine);
     return;
   }
 
@@ -657,16 +674,20 @@ export async function handleBotReply(ctx: CommandContext): Promise<void> {
     return;
   }
 
-  // ── .botreply echidna on/off — toggle echidna_chat in this group
-  if (sub === "echidna" || sub === "chat") {
+  // ── .botreply chat on/off — toggle companion auto-reply in this group (persona-agnostic)
+  if (sub === "echidna" || sub === "chat" || sub === "chatbot") {
     const val = args[1]?.toLowerCase();
     if (!from.endsWith("@g.us")) {
       await sendText(from, "❌ This is a group-only toggle.");
       return;
     }
+    const isOn = val === "on";
     const { updateGroup } = await import("../db/queries.js");
-    updateGroup(from, { echidna_chat: val === "on" ? "on" : "off" });
-    await sendText(from, `🧠 ${persona.shortLabel} auto-reply in this group: *${val === "on" ? "ON" : "OFF"}*\n${val === "on" ? "They will respond to every message." : "They will only respond when mentioned or replied to."}`);
+    updateGroup(from, { echidna_chat: isOn ? "on" : "off" });
+    const statusLine = isOn
+      ? `╔══════════════════════╗\n║  🤖 𝗔𝗨𝗧𝗢-𝗥𝗘𝗣𝗟𝗬  ·  𝗢𝗡  ║\n╚══════════════════════╝\n\n${persona.shortLabel} will now respond to *every message* in this group.`
+      : `╔══════════════════════╗\n║  🔇 𝗔𝗨𝗧𝗢-𝗥𝗘𝗣𝗟𝗬  ·  𝗢𝗙𝗙 ║\n╚══════════════════════╝\n\n${persona.shortLabel} will only respond when *@mentioned* or *replied to*.`;
+    await sendText(from, statusLine);
     return;
   }
 

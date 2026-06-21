@@ -116,7 +116,7 @@ export default function Profile() {
             {/* Frame ring overlaid on top of the avatar — always rendered if equipped */}
             {equippedFrameId !== null && (
               <img
-                src={`/api/v1/frames/${equippedFrameId}/image`}
+                src={myFrameData?.frame?.url || `/api/v1/frames/${equippedFrameId}/image`}
                 alt="frame"
                 className="absolute inset-0 w-full h-full object-contain pointer-events-none z-20 rounded-full"
                 style={{ filter: "drop-shadow(0 0 6px rgba(160,0,26,0.6))" }}
@@ -729,7 +729,7 @@ function FramesTab({ token, userRole }: { token: string | null; userRole?: strin
                   )}
                   <div className="w-20 h-20 rounded-full overflow-hidden bg-black/50 border border-white/10 flex items-center justify-center">
                     <img
-                      src={`/api/v1/frames/${frame.id}/image`}
+                      src={frame.url || `/api/v1/frames/${frame.id}/image`}
                       alt={frame.name}
                       className="w-full h-full object-contain"
                       loading="lazy"

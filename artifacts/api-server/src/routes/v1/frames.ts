@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type Request, type Response, type NextFunction } from "express";
 import multer from "multer";
 import sharp from "sharp";
 import { requireAuth, type AuthRequest } from "./middleware.js";
@@ -8,6 +8,23 @@ import { svgToFramePng } from "../../bot/frames.js";
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 4 * 1024 * 1024 } });
+
+/** Accept both web-session (Bearer JWT) and admin-session tokens */
+function requireAuthOrAdmin(req: Request, res: Response, next: NextFunction): void {
+  const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
+  if (token) {
+    const db = getDb();
+    const now = Math.floor(Date.now() / 1000);
+    const adminRow = db.prepare("SELECT 1 FROM admin_sessions WHERE token = ? AND expires_at > ?").get(token, now);
+    if (adminRow) {
+      (req as any).isAdminSession = true;
+      (req as any).userId = "admin";
+      next();
+      return;
+    }
+  }
+  requireAuth(req as AuthRequest, res, next);
+}
 
 const BOT_OWNER = (process.env["BOT_OWNER_LID"] || "2348144550593").replace(/\D/g, "");
 
@@ -45,6 +62,12 @@ router.get("/:id/image", async (req, res) => {
     if (isNaN(id)) { res.status(400).json({ success: false, message: "Invalid ID" }); return; }
     const frame = getFrameById(id);
     if (!frame) { res.status(404).json({ success: false, message: "Frame not found" }); return; }
+
+    // URL-based frame — redirect to the remote image (cached by browser)
+    if (frame.url && (!frame.image || !Buffer.isBuffer(frame.image) || frame.image.length === 0)) {
+      res.redirect(302, frame.url);
+      return;
+    }
 
     let imageBuffer: Buffer;
     if (frame.image && Buffer.isBuffer(frame.image) && frame.image.length > 0) {
@@ -84,15 +107,20 @@ router.put("/equip", requireAuth, (req: AuthRequest, res) => {
 router.get("/me", requireAuth, (req: AuthRequest, res) => {
   try {
     const frame = getUserEquippedFrame(req.userId!);
-    res.json({ success: true, frame: frame ? { id: frame.id, name: frame.name, theme: frame.theme } : null });
+    res.json({
+      success: true,
+      frame: frame
+        ? { id: frame.id, name: frame.name, theme: frame.theme, url: frame.url || null }
+        : null,
+    });
   } catch {
     res.status(500).json({ success: false, message: "Failed to get equipped frame" });
   }
 });
 
-router.post("/upload", requireAuth, upload.single("frame"), async (req: AuthRequest, res) => {
+router.post("/upload", requireAuthOrAdmin, upload.single("frame"), async (req: AuthRequest, res) => {
   try {
-    if (!isStaff(req)) {
+    if (!(req as any).isAdminSession && !isStaff(req)) {
       res.status(403).json({ success: false, message: "Staff only" });
       return;
     }
@@ -108,16 +136,17 @@ router.post("/upload", requireAuth, upload.single("frame"), async (req: AuthRequ
       .png()
       .toBuffer();
 
-    const id = addFrame(name, theme, null, png, req.userId!);
+    const uploadedBy = req.userId || "admin";
+    const id = addFrame(name, theme, null, png, uploadedBy);
     res.json({ success: true, message: `Frame "${name}" uploaded`, frameId: id });
   } catch {
     res.status(500).json({ success: false, message: "Failed to upload frame" });
   }
 });
 
-router.delete("/:id", requireAuth, (req: AuthRequest, res) => {
+router.delete("/:id", requireAuthOrAdmin, (req: AuthRequest, res) => {
   try {
-    if (!isStaff(req)) {
+    if (!(req as any).isAdminSession && !isStaff(req)) {
       res.status(403).json({ success: false, message: "Staff only" });
       return;
     }

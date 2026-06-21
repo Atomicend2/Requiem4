@@ -11,6 +11,7 @@ import {
 import { Boom } from "@hapi/boom";
 import path from "path";
 import fs from "fs";
+import { spawnSync } from "child_process";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { logger } from "../lib/logger.js";
 import { handleMessage } from "./handlers/message.js";
@@ -392,8 +393,68 @@ export async function sendVideo(jid: string, videoBuffer: Buffer, caption?: stri
   return sendWithRetry(() => s.sendMessage(jid, { video: videoBuffer, gifPlayback: true, mimetype: "video/mp4", caption: caption || "" }, withReplyOptions()));
 }
 
-export async function sendMedia(jid: string, buffer: Buffer, isVideo: boolean, caption?: string) {
-  return isVideo ? sendVideo(jid, buffer, caption) : sendImage(jid, buffer, caption);
+/** Convert a GIF buffer to MP4 using ffmpeg (required — WhatsApp doesn't support .gif) */
+function gifToMp4(gifBuf: Buffer): Buffer | null {
+  try {
+    const tmpGif = path.join("/tmp", `wa_gif_${Date.now()}.gif`);
+    const tmpMp4 = path.join("/tmp", `wa_gif_${Date.now()}.mp4`);
+    fs.writeFileSync(tmpGif, gifBuf);
+    const result = spawnSync("ffmpeg", [
+      "-y", "-f", "gif", "-i", tmpGif,
+      "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+      "-c:v", "libx264", "-pix_fmt", "yuv420p",
+      "-movflags", "+faststart", "-preset", "ultrafast",
+      tmpMp4,
+    ], { timeout: 30000 });
+    fs.unlinkSync(tmpGif);
+    if (result.status !== 0) {
+      logger.warn({ stderr: result.stderr?.toString() }, "ffmpeg GIF→MP4 failed");
+      return null;
+    }
+    const mp4 = fs.readFileSync(tmpMp4);
+    fs.unlinkSync(tmpMp4);
+    return mp4;
+  } catch (err) {
+    logger.warn({ err }, "gifToMp4 error");
+    return null;
+  }
+}
+
+export async function sendMedia(jid: string, buffer: Buffer, isAnimated: boolean, caption?: string) {
+  if (!isAnimated) return sendImage(jid, buffer, caption);
+
+  const s = getActiveSock();
+
+  // Detect buffer type by magic bytes
+  const isGif = buffer.length >= 4
+    && buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46; // GIF8
+
+  const isWebm = buffer.length >= 4
+    && buffer[0] === 0x1A && buffer[1] === 0x45 && buffer[2] === 0xDF && buffer[3] === 0xA3;
+
+  if (isGif) {
+    // WhatsApp does NOT support .gif — convert to MP4 first, then send as video/gifPlayback
+    const mp4 = gifToMp4(buffer);
+    if (mp4) {
+      return sendWithRetry(() =>
+        s.sendMessage(jid, { video: mp4, gifPlayback: true, mimetype: "video/mp4", caption: caption || "" }, withReplyOptions())
+      );
+    }
+    // ffmpeg unavailable or failed — fall back to static image
+    logger.warn("GIF→MP4 conversion failed, sending as static image");
+    return sendImage(jid, buffer, caption);
+  }
+
+  if (isWebm) {
+    return sendWithRetry(() =>
+      s.sendMessage(jid, { video: buffer, gifPlayback: true, mimetype: "video/webm", caption: caption || "" }, withReplyOptions())
+    );
+  }
+
+  // MP4 or unknown animated format
+  return sendWithRetry(() =>
+    s.sendMessage(jid, { video: buffer, gifPlayback: true, mimetype: "video/mp4", caption: caption || "" }, withReplyOptions())
+  );
 }
 
 export async function sendReact(jid: string, msgKey: any, emoji: string) {

@@ -36,6 +36,9 @@ export async function handleGroupParticipantsUpdate(
     return;
   }
 
+  // Re-fetch group from DB to get latest settings (welcome/leave may have changed)
+  const freshGroup = getGroup(groupId) || group;
+
   // Always fetch fresh group metadata so @lid JIDs can be resolved to real phone JIDs
   let groupMeta: any = await sock.groupMetadata(groupId).catch(() => null);
 
@@ -59,7 +62,7 @@ export async function handleGroupParticipantsUpdate(
       // Only flag explicit bot accounts (.bot@ pattern). @lid is how newer
       // WhatsApp clients appear and should NEVER be treated as a bot.
       const isLikelyBot = rawParticipant.includes(".bot@");
-      if (isLikelyBot && (group.anti_bot || "off") === "on") {
+      if (isLikelyBot && (freshGroup.anti_bot || "off") === "on") {
         try {
           await sock.groupParticipantsUpdate(groupId, [rawParticipant], "remove");
           await sendText(groupId, `🤖 Suspected bot account was automatically removed.`);
@@ -68,8 +71,8 @@ export async function handleGroupParticipantsUpdate(
         continue;
       }
 
-      if (group.welcome === "on") {
-        const template = group.welcome_msg || "Welcome to the group, @user! 👋";
+      if (freshGroup.welcome === "on") {
+        const template = freshGroup.welcome_msg || "Welcome to the group, @user! 👋";
         const memberCount = (groupMeta?.participants?.length ?? 0) || undefined;
         const pushName = groupMeta?.participants?.find((p: any) => p.id === participant)?.name || undefined;
         const displayName = pushName || participant.split("@")[0].split(":")[0];
@@ -103,11 +106,11 @@ export async function handleGroupParticipantsUpdate(
         }
       }
     } else if (action === "remove" || action === "leave") {
-      if (group.leave === "on") {
+      if (freshGroup.leave === "on") {
         const pushName = groupMeta?.participants?.find((p: any) => p.id === participant)?.name || undefined;
         const displayName = pushName || participant.split("@")[0].split(":")[0];
         const memberCount = Math.max(0, (groupMeta?.participants?.length ?? 1) - 1) || undefined;
-        const template = group.leave_msg || `Goodbye @user! 👋`;
+        const template = freshGroup.leave_msg || `Goodbye @user! 👋`;
 
         // ── Try to build and send a goodbye image card ───────────────────────
         const card = await generateWelcomeCard({

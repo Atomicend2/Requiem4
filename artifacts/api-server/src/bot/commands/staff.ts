@@ -328,25 +328,44 @@ export async function handleStaff(ctx: CommandContext): Promise<void> {
       return;
     }
     try {
-      // First fetch invite info to get the group JID — this also validates the code
-      // and avoids account_reachout_restricted errors that happen on blind accepts.
-      let groupId: string | undefined;
+      // Fetch invite info first — validates the code and gets the group JID + subject
+      let inviteInfo: any = null;
       try {
-        const info = await sock.groupGetInviteInfo(code);
-        groupId = info?.id;
+        inviteInfo = await sock.groupGetInviteInfo(code);
       } catch {
-        // getInviteInfo may not be available on all Baileys versions — fall through
+        // groupGetInviteInfo may fail on some Baileys versions — fall through
       }
-      if (groupId) {
-        // If the bot is already in the group, skip the join
-        const existing = await sock.groupMetadata(groupId).catch(() => null);
+
+      if (inviteInfo?.id) {
+        // Check if bot is already in the group
+        const existing = await sock.groupMetadata(inviteInfo.id).catch(() => null);
         if (existing) {
           await sendText(from, `✅ Bot is already in *${existing.subject}*.`);
           return;
         }
+
+        // Use groupAcceptInviteV4 with the groupInviteMessage object for best compatibility
+        // This is the recommended Baileys method — avoids account_reachout_restricted errors
+        const groupInviteMessage = {
+          inviteCode: code,
+          inviteExpiration: inviteInfo.inviteExpiration || 0,
+          groupJid: inviteInfo.id,
+          groupName: inviteInfo.subject || "",
+          groupThumbnail: undefined as any,
+        };
+        try {
+          await sock.groupAcceptInviteV4(from, groupInviteMessage);
+          await sendText(from, `✅ Bot has joined *${inviteInfo.subject || "the group"}*.`);
+        } catch (v4err: any) {
+          // V4 failed — fall back to simple accept
+          await sock.groupAcceptInvite(code);
+          await sendText(from, `✅ Bot has joined *${inviteInfo.subject || "the group"}*.`);
+        }
+      } else {
+        // No invite info — try plain accept
+        await sock.groupAcceptInvite(code);
+        await sendText(from, `✅ Bot has joined the group.`);
       }
-      await sock.groupAcceptInvite(code);
-      await sendText(from, `✅ Bot has joined the group.`);
     } catch (err: any) {
       const msg = err?.message || "Unknown error";
       // account_reachout_restricted = WA has rate-limited or restricted this bot

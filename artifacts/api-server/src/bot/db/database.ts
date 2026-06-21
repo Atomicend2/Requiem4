@@ -478,6 +478,7 @@ function initSchema(db: Database.Database): void {
   // (stored in addition to id which is ALSO the phone, but this column lets
   //  us quickly answer "which user owns WhatsApp number X").
   ensureColumn(db, "users", "whatsapp_id", "TEXT DEFAULT NULL");
+  ensureColumn(db, "users", "lottery_tickets", "INTEGER DEFAULT 0");
   ensureColumn(db, "users", "lottery_tickets_bought_today", "INTEGER DEFAULT 0");
   ensureColumn(db, "users", "lottery_tickets_reset_date", "TEXT DEFAULT ''");
   ensureColumn(db, "users", "registered_at", "INTEGER DEFAULT 0");
@@ -552,6 +553,7 @@ function initSchema(db: Database.Database): void {
   ensureColumn(db, "users", "display_id", "TEXT");
   ensureColumn(db, "user_cards", "copy_id", "TEXT");
   ensureColumn(db, "users", "owner_greeted", "INTEGER DEFAULT 0");
+  ensureColumn(db, "frames", "url", "TEXT");
 
   // Rename "Rename Sheet📃" → "Rename Sheet" in shop and existing inventories
   db.prepare("UPDATE shop_items SET name = 'Rename Sheet' WHERE name = 'Rename Sheet📃'").run();
@@ -668,6 +670,36 @@ function initSchema(db: Database.Database): void {
     console.warn("[db] Ghost LID row cleanup (non-fatal):", err);
   }
   // ──────────────────────────────────────────────────────────────────────────
+
+  // Seed URL-based frames from the rimuruslime.com frame library
+  seedUrlFrames(db);
+}
+
+// 195 frames from https://rimuruslime.com/wp-content/uploads/frames/
+const FRAME_URLS: string[] = Array.from({ length: 195 }, (_, i) => {
+  // The JSON is sorted lexicographically: 0,1,10,100,101,...
+  // We reproduce the same numeric ordering used on the server
+  return `https://rimuruslime.com/wp-content/uploads/frames/${i}.png`;
+});
+
+function seedUrlFrames(db: Database.Database): void {
+  try {
+    const existing = db.prepare("SELECT COUNT(*) as c FROM frames WHERE url IS NOT NULL").get() as { c: number };
+    if (existing.c >= FRAME_URLS.length) return; // already seeded
+
+    const insert = db.prepare(
+      "INSERT OR IGNORE INTO frames (name, theme, svg, image, uploaded_by, url) VALUES (?, ?, NULL, NULL, 'system', ?)"
+    );
+    const insertMany = db.transaction((urls: string[]) => {
+      for (let i = 0; i < urls.length; i++) {
+        insert.run(`Frame #${i + 1}`, "url", urls[i]);
+      }
+    });
+    insertMany(FRAME_URLS);
+    console.log(`[db] Seeded ${FRAME_URLS.length} URL frames.`);
+  } catch (err) {
+    console.warn("[db] Frame seeding (non-fatal):", err);
+  }
 }
 
 function ensureColumn(db: Database.Database, table: string, column: string, definition: string): void {

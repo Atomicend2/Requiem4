@@ -1155,6 +1155,7 @@ async function dispatch(ctx: CommandContext): Promise<void> {
       return handleEchidnaInfo(ctx);
 
     case "botreply":
+    case "chatbot":
       return handleBotReply(ctx);
 
     case "sticker":

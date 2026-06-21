@@ -1,7 +1,7 @@
 import type { WASocket } from "@whiskeysockets/baileys";
 import {
   getAllCards, getActiveSpawn, getActiveSpawnByToken, claimSpawn, spawnCardInGroup, giveCard, getCard,
-  ensureUser, getUser, getGroup, ensureGroup, getUserCards,
+  ensureUser, getUser, updateUser, getGroup, ensureGroup, getUserCards,
   getTodaySpawnCount, recordSpawnForGroup, getNextSpawnTime, setNextSpawnTime,
   getGroupActivity, getLastSpawnedCardId, getRecentSpawnedCardIds, recordRecentSpawnedCard, getCardOwnerCount,
 } from "../db/queries.js";
@@ -230,11 +230,25 @@ export async function handleGetCard(
     return;
   }
 
+  // Balance check — claiming costs coins based on tier
+  const tierPrice = TIER_PRICES[card?.tier || "T1"] || 500;
+  const claimerUser = getUser(senderId);
+  const claimerBalance = claimerUser?.balance ?? 0;
+  if (claimerBalance < tierPrice) {
+    await sendText(groupId,
+      `❌ Not enough coins to claim *${card?.name || "this card"}* (${card?.tier || "T?"}).\n\n` +
+      `💰 Cost: $${formatNumber(tierPrice)}\n` +
+      `👛 Your balance: $${formatNumber(claimerBalance)}\n\n` +
+      `_Earn more coins with .daily, .work, .adventure, or dungeon runs._`
+    );
+    return;
+  }
+
   claimSpawn(spawn.id, senderId);
   giveCard(senderId, spawn.card_id);
+  updateUser(senderId, { balance: claimerBalance - tierPrice });
 
   const issueNum = currentOwners + 1;
-  const tierPrice = TIER_PRICES[card?.tier] || 500;
 
   // Strip both the @server suffix and any :device suffix so the display
   // is the plain phone number (e.g. 2547xxx, not 2547xxx:3).

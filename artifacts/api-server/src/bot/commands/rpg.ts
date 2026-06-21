@@ -401,6 +401,7 @@ export async function handleRpg(ctx: CommandContext): Promise<void> {
 async function processDungeonMove(ctx: CommandContext, battle: DungeonBattle, rpg: any): Promise<void> {
   const { from, sender, command: cmd } = ctx;
   const user = getUser(sender);
+  const userId = user?.id || sender.split("@")[0].split(":")[0];
 
   if (battle.healCooldown > 0) battle.healCooldown--;
   const wasDefending = battle.defendActive;

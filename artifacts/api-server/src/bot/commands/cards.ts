@@ -119,11 +119,10 @@ export async function handleCards(ctx: CommandContext): Promise<void> {
         `✦────⋆⋅✧⋅⋆────✦\n\n` +
         `${ownersSection}\n\n` +
         `∘₊✦────────✦₊∘`;
-      if (VIDEO_TIERS.has(found.tier) && !isGifBuffer(buf)) {
-        await sock.sendMessage(from, { video: buf, gifPlayback: true, mimetype: "video/mp4", caption, mentions: ownerMentions });
-      } else {
-        await sock.sendMessage(from, { image: buf, caption, mentions: ownerMentions });
-      }
+      const isAnimated = VIDEO_TIERS.has(found.tier) || found.is_animated === 1 || found.is_animated === true;
+      await sendMedia(from, buf, isAnimated);
+      // Re-send caption as text since sendMedia doesn't support mentions
+      await sock.sendMessage(from, { text: caption, mentions: ownerMentions });
     } else {
       for (let i = 0; i < matches.length; i++) {
         const c = matches[i];
@@ -156,11 +155,9 @@ export async function handleCards(ctx: CommandContext): Promise<void> {
           `𝗧𝗼𝘁𝗮𝗹 𝗜𝘀𝘀𝘂𝗲𝘀: ${owners.length}\n\n` +
           `👥 𝗢𝗪𝗡𝗘𝗥𝗦\n${ownersSection}\n\n` +
           `∘₊✦────────✦₊∘`;
-        if (VIDEO_TIERS.has(c.tier) && !isGifBuffer(buf)) {
-          await sock.sendMessage(from, { video: buf, gifPlayback: true, mimetype: "video/mp4", caption, mentions: ownerMentions });
-        } else {
-          await sock.sendMessage(from, { image: buf, caption, mentions: ownerMentions });
-        }
+        const isAnimated = VIDEO_TIERS.has(c.tier) || c.is_animated === 1 || c.is_animated === true;
+        await sendMedia(from, buf, isAnimated);
+        await sock.sendMessage(from, { text: caption, mentions: ownerMentions });
       }
     }
     return;
@@ -307,14 +304,38 @@ export async function handleCards(ctx: CommandContext): Promise<void> {
     if (!spawn) { await sendText(from, "❌ Invalid or already claimed code."); return; }
     const cardData = getCard(spawn.card_id);
     if (!cardData) { await sendText(from, "❌ Card not found."); return; }
+
+    // Balance check
+    const TIER_CLAIM_PRICES: Record<string, number> = {
+      T1: 500, T2: 1000, T3: 2500, T4: 5000, T5: 10000, T6: 15000, TS: 25000, TX: 50000, TZ: 100000,
+    };
+    const claimCost = TIER_CLAIM_PRICES[cardData.tier] || 500;
+    const claimer = getUser(userId);
+    const claimerBal = claimer?.balance ?? 0;
+    if (claimerBal < claimCost) {
+      await sendText(from,
+        `❌ Not enough coins to claim *${cardData.name}* (${cardData.tier}).\n\n` +
+        `💰 Cost: $${formatNumber(claimCost)}\n` +
+        `👛 Your balance: $${formatNumber(claimerBal)}\n\n` +
+        `_Earn more with .daily, .work, .adventure, or dungeon runs._`
+      );
+      return;
+    }
+
     db.prepare("UPDATE card_spawns SET claimed_by = ?, claimed_at = unixepoch() WHERE id = ?").run(sender, spawn.id);
     giveCard(sender, spawn.card_id);
+    updateUser(userId, { balance: claimerBal - claimCost });
     const buf = await getCardImageBuffer(cardData);
-    await sock.sendMessage(from, {
-      image: buf,
-      caption: `🎉 @${getMentionName(sender)} claimed *${cardData.name}* (${cardData.tier})!`,
-      mentions: [sender],
-    });
+    const isAnim = VIDEO_TIERS.has(cardData.tier) || cardData.is_animated === 1 || cardData.is_animated === true;
+    if (isAnim) {
+      await sendMedia(from, buf, true, `🎉 @${getMentionName(sender)} claimed *${cardData.name}* (${cardData.tier})! 💰 -$${formatNumber(claimCost)}`);
+    } else {
+      await sock.sendMessage(from, {
+        image: buf,
+        caption: `🎉 @${getMentionName(sender)} claimed *${cardData.name}* (${cardData.tier})! 💰 -$${formatNumber(claimCost)}`,
+        mentions: [sender],
+      });
+    }
     return;
   }
 
@@ -784,8 +805,11 @@ async function getCardImageBuffer(card: any): Promise<Buffer> {
   }
   // 3. Build CDN URL from shoob_id as final fallback
   if (!mediaUrl && card.shoob_id) {
+    // Prefer webm for animated cards (already video, no conversion needed).
+    // For non-animated or if has_webm is false, use gif which sendMedia will convert to mp4.
     const hasWebm = card.has_webm === 1 || card.has_webm === true;
-    mediaUrl = hasWebm
+    const isAnimatedCard = VIDEO_TIERS.has(card.tier) || card.is_animated === 1 || card.is_animated === true;
+    mediaUrl = (isAnimatedCard && hasWebm)
       ? `https://api.shoob.gg/site/api/cardr/${card.shoob_id}?type=webm`
       : `https://api.shoob.gg/site/api/cardr/${card.shoob_id}?size=400`;
   }

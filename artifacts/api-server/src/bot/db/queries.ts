@@ -1309,7 +1309,7 @@ export function clearAllPlayerData() {
 
 export function getAllFrames() {
   const db = getDb();
-  return db.prepare("SELECT id, name, theme, svg, uploaded_by, created_at FROM frames ORDER BY id ASC").all() as any[];
+  return db.prepare("SELECT id, name, theme, svg, url, uploaded_by, created_at FROM frames ORDER BY id ASC").all() as any[];
 }
 
 export function getFrameById(id: number) {
@@ -1317,11 +1317,11 @@ export function getFrameById(id: number) {
   return db.prepare("SELECT * FROM frames WHERE id = ?").get(id) as any;
 }
 
-export function addFrame(name: string, theme: string, svg: string | null, image: Buffer | null, uploadedBy: string): number {
+export function addFrame(name: string, theme: string, svg: string | null, image: Buffer | null, uploadedBy: string, url?: string): number {
   const db = getDb();
   const result = db.prepare(
-    "INSERT INTO frames (name, theme, svg, image, uploaded_by) VALUES (?, ?, ?, ?, ?)"
-  ).run(name, theme, svg, image, uploadedBy);
+    "INSERT INTO frames (name, theme, svg, image, uploaded_by, url) VALUES (?, ?, ?, ?, ?, ?)"
+  ).run(name, theme, svg, image, uploadedBy, url || null);
   return Number(result.lastInsertRowid);
 }
 
