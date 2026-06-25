@@ -3,7 +3,9 @@ import { Button } from "@/components/ui/button";
 import { Users, CreditCard, Shield, Activity, ArrowRight, Sword, Coins, Zap, Dices } from "lucide-react";
 
 export default function Home() {
-  const { data: stats, isLoading } = useGetCommunityStats();
+  const { data: stats, isLoading } = useGetCommunityStats({
+    query: { refetchInterval: 30000, retry: 5, retryDelay: 3000 },
+  });
 
   return (
     <div className="min-h-[100dvh]">

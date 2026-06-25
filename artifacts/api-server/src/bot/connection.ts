@@ -1,6 +1,5 @@
 import {
   makeWASocket,
-  useMultiFileAuthState,
   DisconnectReason,
   makeCacheableSignalKeyStore,
   fetchLatestBaileysVersion,
@@ -8,6 +7,8 @@ import {
   type WASocket,
   type BaileysEventMap,
 } from "@whiskeysockets/baileys";
+import { useMongoAuthState } from "./db/mongo-auth.js";
+import { col } from "./db/mongo.js";
 import { Boom } from "@hapi/boom";
 import path from "path";
 import fs from "fs";
@@ -198,7 +199,7 @@ export async function connectToWhatsApp(phoneNumber?: string, options: ConnectOp
   }
   isConnecting = true;
   const generation = ++connectionGeneration;
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  const { state, saveCreds } = await useMongoAuthState("primary");
   const { version, isLatest } = await fetchLatestBaileysVersion();
   const browser = Browsers.ubuntu("Chrome");
   logger.info({ version, isLatest, browser }, "Using WhatsApp Web pairing identity");
@@ -213,6 +214,15 @@ export async function connectToWhatsApp(phoneNumber?: string, options: ConnectOp
     fatal: () => {},
     child: () => silentLogger,
   };
+
+  // Simple in-memory group metadata cache so welcome/leave messages
+  // can fetch participant lists without an extra network round-trip.
+  const groupMetaCache = new Map<string, { data: any; ts: number }>();
+  const GROUP_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+  function cacheGroupMeta(jid: string, data: any) {
+    groupMetaCache.set(jid, { data, ts: Date.now() });
+  }
 
   sock = makeWASocket({
     version,
@@ -231,6 +241,11 @@ export async function connectToWhatsApp(phoneNumber?: string, options: ConnectOp
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
     keepAliveIntervalMs: 30000,
+    cachedGroupMetadata: async (jid) => {
+      const cached = groupMetaCache.get(jid);
+      if (cached && Date.now() - cached.ts < GROUP_CACHE_TTL_MS) return cached.data;
+      return undefined;
+    },
   });
 
   if (!state.creds.registered) {
@@ -268,9 +283,7 @@ export async function connectToWhatsApp(phoneNumber?: string, options: ConnectOp
         }
         logger.info("Logged out from WhatsApp — clearing auth");
         pairingCode = null;
-        // Wipe only the auth credentials
-        fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-        fs.mkdirSync(AUTH_DIR, { recursive: true });
+        col("wa_auth").deleteMany({ bot_id: "primary" }).catch(() => {});
         // Auto-reconnect — re-pair manually via Admin Panel > Bot Manager
         setTimeout(() => {
           if (generation === connectionGeneration) {
@@ -290,19 +303,14 @@ export async function connectToWhatsApp(phoneNumber?: string, options: ConnectOp
       // when they send their first WhatsApp message. Inserting here would
       // show unregistered owners in member counts and leaderboards.
       try {
-        const { getDb } = await import("./db/database.js");
-        const db = getDb();
+        const { addStaff, getStaff, updateUser } = await import("./db/queries.js");
         for (const phone of getOwnerNumbers()) {
-          // Use bare phone as user_id (consistent with normalizeUserId)
-          const existingStaff = db.prepare("SELECT 1 FROM staff WHERE user_id = ?").get(phone);
-          if (!existingStaff) {
-            db.prepare("INSERT OR REPLACE INTO staff (user_id, role, added_by, added_at) VALUES (?, 'owner', 'system', unixepoch())").run(phone);
+          const existing = await getStaff(phone);
+          if (!existing) {
+            await addStaff(phone, "owner", "system");
           }
-          // Also ensure lid is stored on the owner's users row if the row exists
-          const ownerLid = BOT_OWNER_LID;
-          if (ownerLid) {
-            db.prepare("UPDATE users SET lid = ? WHERE id = ? AND (lid IS NULL OR lid = '' OR lid = id)")
-              .run(ownerLid, phone);
+          if (BOT_OWNER_LID) {
+            await updateUser(phone, { lid: BOT_OWNER_LID }).catch(() => {});
           }
         }
         logger.info({ owners: getOwnerNumbers(), ownerLid: BOT_OWNER_LID }, "Owner numbers synced to staff");
@@ -336,6 +344,8 @@ export async function connectToWhatsApp(phoneNumber?: string, options: ConnectOp
 
   sock.ev.on("group-participants.update", async (update) => {
     try {
+      // Invalidate cached metadata so welcome/leave handlers see fresh participants
+      groupMetaCache.delete(update.id);
       await handleGroupParticipantsUpdate(sock!, update as any);
     } catch (err) {
       logger.error({ err }, "Error handling group participants update");
@@ -344,9 +354,22 @@ export async function connectToWhatsApp(phoneNumber?: string, options: ConnectOp
 
   sock.ev.on("groups.update", async (updates) => {
     try {
+      // Keep cache fresh when group info changes (name, description, etc.)
+      for (const u of updates) {
+        if (u.id) groupMetaCache.delete(u.id);
+      }
       await handleGroupUpdate(sock!, updates);
     } catch (err) {
       logger.error({ err }, "Error handling groups update");
+    }
+  });
+
+  // Warm the group metadata cache whenever Baileys delivers a full metadata object
+  sock.ev.on("messaging-history.set", ({ chats }) => {
+    for (const chat of chats) {
+      if (chat.id?.endsWith("@g.us") && (chat as any).metadata) {
+        cacheGroupMeta(chat.id, (chat as any).metadata);
+      }
     }
   });
 
@@ -380,12 +403,18 @@ export async function sendMessage(jid: string, content: any, options?: any) {
 
 export async function sendText(jid: string, text: string, mentions?: string[]) {
   const s = getActiveSock();
-  return sendWithRetry(() => s.sendMessage(jid, { text, mentions: mentions || [] }, withReplyOptions()));
+  // Auto-detect @phonenumber patterns in text and ensure they are in the mentions
+  // array. WhatsApp ONLY renders tappable blue mentions when the JID is in the
+  // mentions array — the @number in the text string alone is never enough.
+  const autoMentions = [...text.matchAll(/@(\d{7,15})\b/g)]
+    .map(m => `${m[1]}@s.whatsapp.net`);
+  const allMentions = [...new Set([...(mentions ?? []), ...autoMentions])];
+  return sendWithRetry(() => s.sendMessage(jid, { text, mentions: allMentions }, withReplyOptions()));
 }
 
-export async function sendImage(jid: string, imageBuffer: Buffer, caption?: string) {
+export async function sendImage(jid: string, imageBuffer: Buffer, caption?: string, mentions?: string[]) {
   const s = getActiveSock();
-  return sendWithRetry(() => s.sendMessage(jid, { image: imageBuffer, caption: caption || "" }, withReplyOptions()));
+  return sendWithRetry(() => s.sendMessage(jid, { image: imageBuffer, caption: caption || "", mentions }, withReplyOptions()));
 }
 
 export async function sendVideo(jid: string, videoBuffer: Buffer, caption?: string) {
@@ -393,67 +422,99 @@ export async function sendVideo(jid: string, videoBuffer: Buffer, caption?: stri
   return sendWithRetry(() => s.sendMessage(jid, { video: videoBuffer, gifPlayback: true, mimetype: "video/mp4", caption: caption || "" }, withReplyOptions()));
 }
 
-/** Convert a GIF buffer to MP4 using ffmpeg (required — WhatsApp doesn't support .gif) */
-function gifToMp4(gifBuf: Buffer): Buffer | null {
+/**
+ * Convert an animated buffer (GIF or WebM) to H.264 MP4 using ffmpeg.
+ * WhatsApp requires MP4 for all video/gif messages.
+ * Returns null if ffmpeg fails or is unavailable.
+ */
+function animatedToMp4(buf: Buffer, srcExt: "gif" | "webm"): Buffer | null {
   try {
-    const tmpGif = path.join("/tmp", `wa_gif_${Date.now()}.gif`);
-    const tmpMp4 = path.join("/tmp", `wa_gif_${Date.now()}.mp4`);
-    fs.writeFileSync(tmpGif, gifBuf);
+    const uid = Date.now();
+    const tmpIn  = path.join("/tmp", `wa_anim_${uid}.${srcExt}`);
+    const tmpOut = path.join("/tmp", `wa_anim_${uid}.mp4`);
+    fs.writeFileSync(tmpIn, buf);
+
+    // For GIFs: force 15 fps so variable-delay frames are all preserved.
+    // For WebM: let ffmpeg infer the fps from the source.
+    const gifArgs = srcExt === "gif" ? ["-r", "15"] : [];
+
+    // WebM files usually carry Opus/Vorbis audio — convert to AAC.
+    // Even for silent sources (GIF/WebM with no audio), WhatsApp on some
+    // endpoints requires an active audio track, so inject a silent one.
+    const audioArgs = [
+      "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+      "-c:a", "aac", "-b:a", "128k",
+      "-shortest",
+    ];
+
     const result = spawnSync("ffmpeg", [
-      "-y", "-f", "gif", "-i", tmpGif,
+      "-y",
+      ...(srcExt === "gif" ? ["-f", "gif"] : []),
+      "-i", tmpIn,
+      ...gifArgs,
+      ...audioArgs,
       "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-      "-c:v", "libx264", "-pix_fmt", "yuv420p",
-      "-movflags", "+faststart", "-preset", "ultrafast",
-      tmpMp4,
-    ], { timeout: 30000 });
-    fs.unlinkSync(tmpGif);
+      "-c:v", "libx264", "-profile:v", "main", "-pix_fmt", "yuv420p",
+      "-movflags", "+faststart", "-preset", "fast",
+      tmpOut,
+    ], { timeout: 60000 });
+
+    fs.unlinkSync(tmpIn);
     if (result.status !== 0) {
-      logger.warn({ stderr: result.stderr?.toString() }, "ffmpeg GIF→MP4 failed");
+      logger.warn({ stderr: result.stderr?.toString(), srcExt }, "ffmpeg animated→MP4 failed");
       return null;
     }
-    const mp4 = fs.readFileSync(tmpMp4);
-    fs.unlinkSync(tmpMp4);
+    const mp4 = fs.readFileSync(tmpOut);
+    fs.unlinkSync(tmpOut);
     return mp4;
   } catch (err) {
-    logger.warn({ err }, "gifToMp4 error");
+    logger.warn({ err }, "animatedToMp4 error");
     return null;
   }
 }
 
-export async function sendMedia(jid: string, buffer: Buffer, isAnimated: boolean, caption?: string) {
-  if (!isAnimated) return sendImage(jid, buffer, caption);
+export async function sendMedia(jid: string, buffer: Buffer, isAnimated: boolean, caption?: string, mentions?: string[]) {
+  if (!isAnimated) return sendImage(jid, buffer, caption, mentions);
 
   const s = getActiveSock();
 
-  // Detect buffer type by magic bytes
-  const isGif = buffer.length >= 4
-    && buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46; // GIF8
+  // Detect format by magic bytes
+  const isGif  = buffer.length >= 4
+    && buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46; // "GIF"
 
   const isWebm = buffer.length >= 4
     && buffer[0] === 0x1A && buffer[1] === 0x45 && buffer[2] === 0xDF && buffer[3] === 0xA3;
 
+  const isMp4  = buffer.length > 8
+    && buffer.slice(4, 8).toString("ascii") === "ftyp";
+
+  // GIF — must convert to MP4 (WhatsApp rejects .gif entirely)
   if (isGif) {
-    // WhatsApp does NOT support .gif — convert to MP4 first, then send as video/gifPlayback
-    const mp4 = gifToMp4(buffer);
+    const mp4 = animatedToMp4(buffer, "gif");
     if (mp4) {
       return sendWithRetry(() =>
-        s.sendMessage(jid, { video: mp4, gifPlayback: true, mimetype: "video/mp4", caption: caption || "" }, withReplyOptions())
+        s.sendMessage(jid, { video: mp4, gifPlayback: true, mimetype: "video/mp4", caption: caption || "", mentions }, withReplyOptions())
       );
     }
-    // ffmpeg unavailable or failed — fall back to static image
-    logger.warn("GIF→MP4 conversion failed, sending as static image");
-    return sendImage(jid, buffer, caption);
+    logger.warn("GIF→MP4 failed, falling back to static image");
+    return sendImage(jid, buffer, caption, mentions);
   }
 
+  // WebM — convert to MP4 for maximum WhatsApp compatibility
   if (isWebm) {
-    return sendWithRetry(() =>
-      s.sendMessage(jid, { video: buffer, gifPlayback: true, mimetype: "video/webm", caption: caption || "" }, withReplyOptions())
-    );
+    const mp4 = animatedToMp4(buffer, "webm");
+    if (mp4) {
+      return sendWithRetry(() =>
+        s.sendMessage(jid, { video: mp4, gifPlayback: true, mimetype: "video/mp4", caption: caption || "", mentions }, withReplyOptions())
+      );
+    }
+    logger.warn("WebM→MP4 failed, falling back to static image");
+    return sendImage(jid, buffer, caption, mentions);
   }
 
-  // MP4 or unknown animated format
+  // Already MP4 (or unknown animated format) — send directly
   return sendWithRetry(() =>
-    s.sendMessage(jid, { video: buffer, gifPlayback: true, mimetype: "video/mp4", caption: caption || "" }, withReplyOptions())
+    s.sendMessage(jid, { video: buffer, gifPlayback: true, mimetype: "video/mp4", caption: caption || "", mentions }, withReplyOptions())
   );
 }
 

@@ -54,6 +54,41 @@ export function getTierEmoji(tier: string): string {
   return map[tier] || "❓";
 }
 
+/**
+ * Returns a small badge emoji for event cards based on their event_name.
+ * Falls back to a generic 🎉 if the event isn't recognized.
+ * Pass card.event_name (e.g. "christmas", "halloween") — case-insensitive.
+ */
+export function getEventEmoji(eventName: string | null | undefined): string {
+  if (!eventName) return "";
+  const map: Record<string, string> = {
+    christmas: "🎄",
+    xmas: "🎄",
+    halloween: "🎃",
+    easter: "🐰",
+    valentine: "💘",
+    summer: "☀️",
+    winter: "❄️",
+    "new year": "🎆",
+    newyear: "🎆",
+    anniversary: "🎂",
+    lunar: "🧧",
+  };
+  return map[eventName.toLowerCase().trim()] || "🎉";
+}
+
+/**
+ * Builds the display label for a card, e.g. "⭐🎃 Rem (Halloween)".
+ * Use this anywhere a card name is rendered to players.
+ */
+export function getCardDisplayLabel(card: { name: string; tier: string; is_event?: number | boolean; event_name?: string | null }): string {
+  const tierEmoji = getTierEmoji(card.tier);
+  if (!card.is_event) return `${tierEmoji} ${card.name}`;
+  const eventEmoji = getEventEmoji(card.event_name);
+  const eventTag = card.event_name ? ` (${card.event_name})` : "";
+  return `${tierEmoji}${eventEmoji} ${card.name}${eventTag}`;
+}
+
 export function getTierValue(tier: string): number {
   const map: Record<string, number> = {
     T1: 1,
@@ -79,17 +114,35 @@ export function getRandomCard(cards: any[]): any {
 
 export function getWeightedRandomCard(cards: any[]): any {
   if (cards.length === 0) return null;
+
+  // TX and TZ can NEVER spawn — they are summon-only.
+  // Event cards (is_event: 1) can NEVER spawn normally either — they only come from event games.
+  const spawnableCards = cards.filter(
+    (c) => c.tier !== "TX" && c.tier !== "TZ" && c.is_event !== 1 && c.is_event !== true
+  );
+  if (spawnableCards.length === 0) return null;
+
+  // Rarity weights (higher = more common):
+  // TS & T6: both very very rare (blue moon tier) — TS slightly rarer than T6
+  // T5: rare, but noticeably more common than T6
+  // T4 and below: normal spawn pool
   const weights: Record<string, number> = {
-    T1: 40, T2: 25, T3: 15, T4: 10, T5: 6, TS: 3, TX: 1
+    T1: 400, T2: 200, T3: 100, T4: 40, T5: 10, T6: 2, TS: 1,
   };
-  const weighted: any[] = [];
-  for (const card of cards) {
-    const w = weights[card.tier] || 10;
-    for (let i = 0; i < w; i++) {
-      weighted.push(card);
-    }
+
+  let totalWeight = 0;
+  const cardWeights = spawnableCards.map((c) => {
+    const w = weights[c.tier] ?? 10;
+    totalWeight += w;
+    return { card: c, w };
+  });
+
+  let rand = Math.random() * totalWeight;
+  for (const { card, w } of cardWeights) {
+    rand -= w;
+    if (rand <= 0) return card;
   }
-  return weighted[Math.floor(Math.random() * weighted.length)];
+  return spawnableCards[spawnableCards.length - 1];
 }
 
 export function coinFlip(): "heads" | "tails" {

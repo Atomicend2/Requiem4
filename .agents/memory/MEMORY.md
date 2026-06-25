@@ -1,0 +1,14 @@
+- [Card loader memory optimization](card-loader-memory.md) — loaders check file-size metadata in sync_meta collection BEFORE reading JSON; avoids 50k-card JSON loads on cold starts when DB already has the data
+- [MongoDB indexes for cards](mongo-cards-indexes.md) — text index on cards.name+series for fast search; sparse unique on shoob_id and mazoku_id to prevent duplicates; all registered in ensureIndexes() in mongo.ts
+- [from-mazoku endpoint uses MongoDB](from-mazoku-endpoint.md) — uses MongoDB (source:"mazoku") not the JSON file; reading mazoku_cards.json on every HTTP request was causing repeated 14k-card memory spikes
+- [Welcome/leave auto-enable](welcome-leave.md) — setwelcome/setleave must set welcome/leave:"on" atomically; separate steps mean users forget the toggle.
+- [WhatsApp mention JID requirement](mention-jid.md) — mentionTag() text alone is not enough; the JID must also be in the mentions array or WhatsApp shows gray non-tappable text.
+- [GIF cards need ffmpeg conversion](gif-card-convert.md) — WhatsApp rejects GIF natively; only WebM URLs stream directly; GIF URLs must be downloaded and converted to MP4 via ffmpeg.
+- [Profile card compositing order](profile-card-frame.md) — frame must be composited BEFORE avatar so it shows as an outer border ring, not covering the avatar face.
+- [MongoDB migration complete](mongo-migration.md) — Full SQLite→MongoDB migration done; col() helper used everywhere; getDb() is a never-stub; only MONGODB_URI credentials block startup.
+- [Bot build & workflow](bot-build-workflow.md) — esbuild via build.mjs (not tsc); run `node build.mjs` in api-server to build; workflow uses `cd artifacts/api-server && pnpm run start` (NOT pnpm run dev — that triggers shadow-garden vite build which fails).
+- [queries.ts getRpg duplicate risk](bot-build-workflow.md) — getRpg already exists at ~line 712 using col("rpg_characters"); appending a second export causes build error; check before adding new functions.
+- [Bot RPG & gambling patterns](bot-rpg-design.md) — STR/AGI/INT/LCK attribute system layered on top of base stats; Baileys real-time animation via sock.sendMessage(jid, {text, edit:key}); mongodb must be in build.mjs external array.
+- [getActiveMute missing await](mute-await-bug.md) — getActiveMute is async; calling it without await makes the condition always truthy (deletes every message). Always await async queries used as if-conditions.
+- [.ci card OOM pattern](card-ci-oom.md) — .ci loops over all matches and downloads one video buffer per match; cap at 3 results + add 20 MB buffer size guard in getCardImageBuffer to prevent status 134 OOM crashes.
+- [Lottery ticket buy flow](lottery-buy-flow.md) — items with effect "lottery_entry" must directly increment users.lottery_tickets on buy, not go to inventory; bank_cap: items also consumed on buy not deferred to .use.

@@ -1,0 +1,616 @@
+[6/23, 8:57 AM] Eᴍᴘᴇʀᴏʀ Lᴇʟᴏᴜᴄʜ: Deleting every message in the group chats why?
+Profile card should be 800x800
+Id of frame should be much shorter if anyone is Going to use it
+Don't use those characters in the image uploaded if they won't be recognized on the profile card image
+Space it out properly I mean the stats on profile card image, use something more cleaner and neater
+Equiping Frame doesn't show on profile card image
+Thsis text here in profile card should show real role 
+ꕥ 𝗥𝗼𝗹𝗲: Ascendant/mod/user/owner/recruit/premium user/etc
+✅ *Account Linked!*
+
+Welcome, *Eᴍᴘᴇʀᴏʀ Lᴇʟᴏᴜᴄʜ*! Your WhatsApp is now connected to your Requiem Order account.
+
+💰 *Balance:* $0
+
+📝 _Visit the website to set your name and password._
+Type *.p* to see your profile or *.help* for all commands.
+
+After successful registration users get bonus of 45000
+
+For horse gambling WhatsApp text width is not so long so somehow edit it in a wise way
+
+Bought bank notes in web and still says I should buy not enough bank capacity
+No place to buy lottery tickets
+And update shop with he items in
+[6/23, 8:59 AM] Eᴍᴘᴇʀᴏʀ Lᴇʟᴏᴜᴄʜ: For.dungeon what is Nan/undefined
+🌟 *Special Attack!* You focused and dealt *NaN damage*!
+
+🏰 *DUNGEON FLOOR undefined*  |  📊 Lv.1 Novice
+A *undefined* (Lv.undefined) stands before you!
+
+⚔️ *You*   ❤️ 🟢 ██████████ `100/100`
+  💙 MP: 50/52
+👾 *undefined*  💀 🔴 ░░░░░░░░░░ `NaN/undefined`
+
+_🎯 Dodge: 0.7%  |  ⚡ Crit: 0.5%_
+
+_Choose your move:_
+⚔️ *.attack*   💥 *.heavy*   🛡️ *.defend*
+🌟 *.special*  🧪 *.heal*  🎒 *.item*
+✨ *.arcane* — Arcane Blast (30 MP)
+🏃 *.flee*     🔍 *.explore*  🏕️ *.rest*
+[6/23, 9:17 AM] Eᴍᴘᴇʀᴏʀ Lᴇʟᴏᴜᴄʜ: What you're actually building is not a traditional RPG.
+
+You're building a persistent MMO world running inside WhatsApp, where .rpg is the world dashboard and .dungeon is just one activity inside the world.
+
+That's a completely different architecture.
+
+The mistake most AI systems make is they think:
+
+.rpg
+ ↓
+Choose class
+ ↓
+Quest
+ ↓
+Level up
+
+But what you're describing is:
+
+WORLD
+│
+├── Players
+├── Guilds
+├── Factions
+├── Territories
+├── Dungeons
+├── Economy
+├── Rumors
+├── Politics
+├── Events
+└── Atlas
+
+The world exists whether the player is online or not.
+
+
+---
+
+CORE COMMAND PHILOSOPHY
+
+.rpg
+
+Not gameplay.
+
+It's a dashboard.
+
+Shows:
+
+HP
+
+Level
+
+Guild
+
+Territory
+
+Reputation
+
+Active quests
+
+World news
+
+
+Example:
+
+WORLD DATE:
+Year 12 Day 48
+
+GLOBAL EVENTS:
+• Northern Rift expanding
+• Black Legion occupies 3 territories
+• Guild War declared
+
+YOUR STATUS:
+Lv 12 Rogue
+
+Guild:
+Shadow Syndicate
+
+Location:
+Ashen District
+
+Influence:
+340
+
+Territory Owned:
+None
+
+No gameplay occurs.
+
+
+---
+
+.dungeon
+
+Actual gameplay.
+
+When player enters:
+
+.dungeon
+
+System generates:
+
+Dungeon:
+Forgotten Cathedral
+
+Floor:
+3
+
+Threat:
+B
+
+Objective:
+Find relic
+
+Choices:
+
+1. Explore hall
+2. Open side door
+3. Search corpses
+4. Retreat
+
+Every choice creates new rooms.
+
+
+---
+
+WORLD ATLAS
+
+This is where things become interesting.
+
+Think of the Atlas as Google Maps for your game.
+
+
+---
+
+Continents
+
+Example:
+
+Aetheris
+Noctara
+Valdris
+Eclipse Reach
+
+
+---
+
+Regions
+
+Inside continent:
+
+Aetheris
+
+├─ Iron Plains
+├─ Royal Capital
+├─ Whisper Woods
+├─ Ember Ridge
+└─ Crystal Coast
+
+
+---
+
+Territories
+
+Inside region:
+
+Whisper Woods
+
+Territories:
+
+North Grove
+Silent Lake
+Moon Shrine
+Black Root Forest
+
+Each territory has:
+
+Owner Guild
+Population
+Resources
+Danger Level
+Influence
+Tax Rate
+
+
+---
+
+TERRITORY SYSTEM
+
+Guilds fight for territories.
+
+Example:
+
+Silent Lake
+
+Owner:
+Black Ravens
+
+Resource:
+Mana Crystal
+
+Income:
+500 gold/day
+
+Influence:
+72%
+
+Guild controls it.
+
+Guild receives income.
+
+Guild can upgrade it.
+
+
+---
+
+GUILD CREATION SYSTEM
+
+I agree with your idea.
+
+Guild creation should be difficult.
+
+Example:
+
+Requirements:
+
+Level 50
+100,000 Gold
+Guild License
+10 Signatures
+
+Guild License:
+
+Only sold by World Authority.
+
+Stock:
+3 per month
+
+Meaning maybe only 20-30 guilds exist globally.
+
+Much better.
+
+
+---
+
+GUILD RANKS
+
+Guild Rank F
+Guild Rank E
+Guild Rank D
+Guild Rank C
+Guild Rank B
+Guild Rank A
+Guild Rank S
+Guild Rank SS
+
+Rank based on:
+
+Territory count
+
+Members
+
+Influence
+
+Wealth
+
+Achievements
+
+
+
+---
+
+WORLD EVENT ENGINE
+
+Runs automatically.
+
+Every few hours:
+
+generateWorldEvent()
+
+Examples:
+
+Political
+
+Royal assassination
+
+Economic
+
+Gold inflation
+
+Natural
+
+Mana storm
+
+Military
+
+Guild war
+
+Dungeon
+
+New dungeon discovered
+
+Events affect everyone.
+
+
+---
+
+EVENT CHAIN SYSTEM
+
+Best part.
+
+Events create events.
+
+Example:
+
+Mana Storm
+ ↓
+Forest mutation
+ ↓
+Monster outbreak
+ ↓
+Village destroyed
+ ↓
+Refugee migration
+ ↓
+Bandit increase
+
+One event causes five more.
+
+World feels alive.
+
+
+---
+
+RANDOM QUEST ENGINE
+
+Never hand-write quests.
+
+Generate them.
+
+Formula:
+
+[Issuer]
++
+[Problem]
++
+[Location]
++
+[Reward]
+
+Example:
+
+Village Elder
+
+needs help because
+
+wolves attack farms
+
+at
+
+Moon Valley
+
+reward
+
+450 gold
+
+Generated automatically.
+
+Infinite quests.
+
+
+---
+
+REPUTATION SYSTEM
+
+Player has reputation with:
+
+Empire
+Mages
+Hunters
+Guilds
+Merchants
+Criminals
+
+Example:
+
+Empire: +70
+
+Criminals: -40
+
+Choices matter.
+
+
+---
+
+CLASS SYSTEM REWORK
+
+Classes should NOT lock story.
+
+This is important.
+
+Bad design:
+
+Mage sees Story A
+Warrior sees Story B
+
+Player misses content.
+
+Instead:
+
+Classes change HOW you solve problems.
+
+Example:
+
+Same event:
+
+A gate is sealed.
+
+Warrior:
+
+Break gate.
+
+Mage:
+
+Dispel seal.
+
+Rogue:
+
+Pick lock.
+
+Necromancer:
+
+Raise dead guard.
+
+Same story.
+
+Different solutions.
+
+Much better.
+
+
+---
+
+LAND OWNERSHIP
+
+This is where late game begins.
+
+Players can buy:
+
+House
+Farm
+Shop
+Fort
+Castle
+
+Guilds can buy:
+
+District
+Town
+Region
+Territory
+
+Income generated passively.
+
+
+---
+
+WORLD PAGE (WEBSITE)
+
+The website should be a live representation of database state.
+
+Not separate lore.
+
+If database says:
+
+Territory Owner:
+Shadow Syndicate
+
+Atlas shows:
+
+Owner:
+Shadow Syndicate
+
+If guild conquers territory:
+
+Website updates.
+
+Everything comes from same world data.
+
+
+---
+
+DATABASE STRUCTURE
+
+At a high level:
+
+Player
+Guild
+Territory
+Region
+Continent
+Quest
+Dungeon
+Event
+Faction
+Property
+WorldState
+
+WorldState controls:
+
+currentDay
+currentSeason
+activeEvents
+worldThreatLevel
+economyMultiplier
+
+Everything references WorldState.
+
+
+---
+
+The biggest thing I'd tell the AI developer is this:
+
+> "Do not treat .rpg as the game. Treat .rpg as a status dashboard for a persistent world simulation. The actual game consists of interconnected systems (dungeons, guilds, factions, territories, economy, reputation, events, atlas, and property ownership) that continue evolving even when players are offline."
+
+
+
+That single design decision changes the entire architecture from a command bot into a living world.
+[6/23, 9:20 AM] Eᴍᴘᴇʀᴏʀ Lᴇʟᴏᴜᴄʜ: Card related commands not working. Like ci I did once and sent the video but after that it only reacts to the message and doesn't send the card also for ss, and other card commands
+
+I think it somehow restarts sever or Instance failed: hlbt6
+Exited with status 134 while running your code. Check your service logs for more information.
+June 23, 2026 at 8:45 AM
+
+Also when want to send webm cards to WhatsApp use
+await sock.sendMessage(
+    id,
+    {
+        video: {
+            url: './Media/ma_gif.mp4'
+        },
+        caption: 'hello word',
+	    ptv: false // if set to true, will send as a `video note`
+    }
+)
+
+
+For gif use
+await sock.sendMessage(
+    jid,
+    {
+        video: fs.readFileSync('Media/ma_gif.mp4'),
+        caption: 'hello word',
+        gifPlayback: true
+    }
+)
+[6/23, 10:16 AM] Eᴍᴘᴇʀᴏʀ Lᴇʟᴏᴜᴄʜ: Add these to shop and web shop and logic is
+To dig you must buy shovel
+Pistol to steal from wallet only
+Debit card is used to buy items from shop without withdrawal and also for claiming cards without withdrawal - only these two
+Debit card needs maintenance if not expire and some sort of punishment about the card (info should be given to the users) 
+Map for rpg to find treasure, locations etc
+Rename Sheet for renaming 
+Lottery ticket for lottery 
+Health pack for rpg D other rpg tools
+Equipments for rpg based on class
+It loads users class in shop and shows the materials needed for dungeon diving
+[6/23, 10:19 AM] Eᴍᴘᴇʀᴏʀ Lᴇʟᴏᴜᴄʜ: And lastly unified_cards.jsonl
+( I wonder why it has an L and what programming language it is)
+Has some duplicates for some cards
+Duplicates look like this
+Names match
+ID match
+URL match
+Tier match
+So find all duplicates and make sure to delete them

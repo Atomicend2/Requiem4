@@ -6,35 +6,16 @@ import https from "https";
 import http from "http";
 import { fileURLToPath } from "url";
 import { requireAuth, optionalAuth, type AuthRequest } from "./middleware.js";
-import { getDb } from "../../bot/db/database.js";
+import { col } from "../../bot/db/mongo.js";
 import { getSocket, isSocketConnected } from "../../bot/connection.js";
-import { getStaff } from "../../bot/db/queries.js";
+import { getStaff, getUserCards, deleteUserCardByCopyId, giveCard } from "../../bot/db/queries.js";
 import { logger } from "../../lib/logger.js";
 
 const __dirname_routes = path.dirname(fileURLToPath(import.meta.url));
-// Resolve cards.json with multiple candidates to handle both esbuild bundle and tsc builds.
-// esbuild (single dist/index.mjs): __dirname_routes = artifacts/api-server/dist/ → 3 levels up
-// tsc (dist/routes/v1/cards.js):   __dirname_routes = dist/routes/v1/          → 5 levels up
-function _resolveCardsJsonPath(): string {
-  const candidates = [
-    path.resolve(__dirname_routes, "../../../cards.json"),       // esbuild bundle
-    path.resolve(__dirname_routes, "../../../../../cards.json"),  // tsc build
-    path.resolve(process.cwd(), "cards.json"),                   // running from repo root
-    path.resolve(process.cwd(), "../../cards.json"),             // running from artifacts/api-server/
-  ];
-  for (const p of candidates) {
-    if (fs.existsSync(p)) return p;
-  }
-  return candidates[0];
-}
-const CARDS_JSON_PATH = _resolveCardsJsonPath();
 
-// Get image URL — prefers stored blob, falls back through all CDN paths
 function getCardImageUrl(card: any): string {
-  // 1. Stored blob (custom / manually uploaded cards)
-  if (card.image_data) return `/api/v1/cards/${card.id}/image`;
+  if (card.image_data) return `/api/v1/cards/${card._id || card.id}/image`;
 
-  // 2. Parse raw_data JSON for media_url or _id
   let rawObj: any = null;
   try {
     if (card.raw_data) {
@@ -42,10 +23,8 @@ function getCardImageUrl(card: any): string {
     }
   } catch {}
 
-  // 3. Direct media_url stored in raw_data (set by cards-loader from cards.json)
   if (rawObj?.media_url) return rawObj.media_url;
 
-  // 4. Build CDN URL from shoob_id (on card itself, or inside raw_data)
   const shoobId = card.shoob_id || rawObj?._id || rawObj?.id;
   if (shoobId) {
     const hasWebm = card.has_webm || rawObj?.has_webm;
@@ -56,167 +35,201 @@ function getCardImageUrl(card: any): string {
   return "";
 }
 
+function toImageBuffer(data: any): Buffer | null {
+  if (!data) return null;
+  if (Buffer.isBuffer(data)) return data;
+  if (data?.buffer instanceof ArrayBuffer) return Buffer.from(data.buffer);
+  if (typeof data === "string") return Buffer.from(data, "base64");
+  try { return Buffer.from(data); } catch { return null; }
+}
 
 const router = Router();
 const uploadMem = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
-const ANIMATED_TIERS = new Set(["T6", "TS", "TX", "TZ"]); // must match VIDEO_TIERS in utils.ts
+const ANIMATED_TIERS = new Set(["T6", "TS", "TX", "TZ"]);
 const VALID_TIERS = ["T1","T2","T3","T4","T5","T6","TS","TX","TZ"];
 
-// Shoob.gg public card API
-// Shoob returns exactly 15 cards per page regardless of any limit= param.
-const SHOOB_API       = "https://api.shoob.gg";
-const SHOOB_PAGE_SIZE = 15; // actual cards per page (Shoob ignores limit=)
+// Mazoku tier → internal tier mapping (C→T2, R→T4, SR→T5, SSR→T6, UR→TS)
+const MAZOKU_TIER_MAP: Record<string, string> = { C: "T2", R: "T4", SR: "T5", SSR: "T6", UR: "TS" };
 
-// ── Read cards directly from cards.json (no DB required) ─────────────────────
-// GET /api/v1/cards/from-json?page=1&limit=50&tier=T3&search=naruto
-// Used by the web frontend as a fallback when the DB hasn't been populated yet,
-// AND as the primary source since cards.json is always up-to-date from GitHub Actions.
-router.get("/from-json", (req, res) => {
+export function mongoDocToFrontendCard(c: any): any {
+  const isAnimated = ANIMATED_TIERS.has(c.tier) || c.is_animated === 1 || c.is_animated === true;
+
+  // Resolve image URL — works for shoob, mazoku, or merged cards
+  let imageUrl = "";
+  let videoUrl: string | null = null;
+  let gifUrl: string | null   = null;
+
+  if (c.shoob_id) {
+    const hasWebm = c.has_webm === 1 || c.has_webm === true;
+    const base    = `https://api.shoob.gg/site/api/cardr/${c.shoob_id}`;
+    imageUrl = hasWebm ? `${base}?type=webm` : `${base}?size=400`;
+    videoUrl = hasWebm ? `${base}?type=webm` : null;
+    // Animated gif via CDN hash when available
+    if (isAnimated && c.file_hash && c.tier) {
+      const tierNum = c.tier.replace(/^T/i, "").toLowerCase();
+      gifUrl = `https://cdn.shoob.gg/images/cards/${tierNum}/${c.file_hash}`;
+    } else if (c.gif_url) {
+      gifUrl = c.gif_url;
+    }
+    // Also pick up mazoku URLs if this was a merged card
+    if (!videoUrl && c.webm_url) videoUrl = c.webm_url;
+    if (!gifUrl   && c.gif_url)  gifUrl   = c.gif_url;
+  } else if (c.mazoku_id) {
+    imageUrl = c.image_url || c.webp_url || `https://cdn7.mazoku.cc/cards/${c.mazoku_id}.webp`;
+    videoUrl = c.webm_url || null;
+    gifUrl   = c.gif_url  || null;
+  } else if (c.image_url) {
+    imageUrl = c.image_url;
+    videoUrl = c.webm_url || null;
+    gifUrl   = c.gif_url  || null;
+  }
+
+  // Also try legacy raw_data for old DB documents
+  if (!imageUrl) {
+    let rawObj: any = null;
+    try { if (c.raw_data) rawObj = typeof c.raw_data === "string" ? JSON.parse(c.raw_data) : c.raw_data; } catch {}
+    imageUrl = rawObj?.media_url || "";
+  }
+
+  const id = c.shoob_id || c.mazoku_id || String(c._id);
+
+  return {
+    id,
+    name:        c.name   || "Unknown",
+    tier:        c.tier   || "T1",
+    series:      c.series || "General",
+    isAnimated,
+    isEvent:     c.is_event === 1 || c.is_event === true,
+    eventName:   c.event_name || null,
+    imageUrl,
+    gifUrl:      gifUrl || imageUrl,
+    videoUrl,
+    totalCopies: 0,
+    owners:      [],
+    ownerName:   "Unclaimed",
+    ownerId:     null,
+  };
+}
+
+const SHOOB_API       = "https://api.shoob.gg";
+const SHOOB_PAGE_SIZE = 15;
+
+// ── Async helpers ─────────────────────────────────────────────────────────────
+
+async function getCardOwner(cardId: string): Promise<{ name: string; id: string } | null> {
+  const ucRow = await col("user_cards").findOne({ card_id: cardId }, { sort: { obtained_at: 1 } });
+  if (!ucRow) return null;
+  const user = await col("users").findOne({ _id: ucRow.user_id });
+  return user ? { id: user._id as string, name: user.name || "Unknown" } : null;
+}
+
+async function getCardCopyCount(cardId: string): Promise<number> {
+  return col("user_cards").countDocuments({ card_id: cardId });
+}
+
+async function getCardOwners(cardId: string, limit = 5): Promise<{ id: string; name: string }[]> {
+  const ucs = await col("user_cards").find({ card_id: cardId }).limit(limit * 2).toArray();
+  const seenIds = new Set<string>();
+  const unique = ucs.filter((uc: any) => {
+    if (seenIds.has(uc.user_id)) return false;
+    seenIds.add(uc.user_id);
+    return true;
+  }).slice(0, limit);
+  if (!unique.length) return [];
+  const ownerIds = unique.map((uc: any) => uc.user_id);
+  const users = await col("users").find({ _id: { $in: ownerIds } }).toArray();
+  const userMap = new Map(users.map((u: any) => [u._id, u.name || "Shadow"]));
+  return ownerIds.map((id: string) => ({ id, name: userMap.get(id) || "Shadow" }));
+}
+
+// ── Read all cards — stable sorted order, unified schema, no source distinction ──
+router.get("/from-json", async (req, res) => {
   try {
-    if (!fs.existsSync(CARDS_JSON_PATH)) {
-      res.status(404).json({ success: false, message: "cards.json not found on server", cards: [], total: 0 });
+    const { tier, search, sortBy, sortDir, page: pageStr, limit: limitStr } = req.query as Record<string, string | undefined>;
+
+    const filter: any = {};
+    if (tier && tier !== "all") filter.tier = tier;
+    if (search) {
+      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      filter.$or = [
+        { name:   { $regex: escaped, $options: "i" } },
+        { series: { $regex: escaped, $options: "i" } },
+      ];
+    }
+
+    const limit = Math.min(Math.max(parseInt(limitStr || "10", 10) || 10, 1), 200);
+    const page  = Math.max(parseInt(pageStr  || "1",  10) || 1, 1);
+    const skip  = (page - 1) * limit;
+
+    // Deterministic, stable sort. _id is always included as a tiebreaker so
+    // that cards with equal sort keys (e.g. same tier, or same name) keep a
+    // fixed relative order across pages instead of shuffling between requests
+    // — without this, paging forward and back could show the same card twice
+    // or skip one entirely whenever two cards tied on the primary sort key.
+    const SORTABLE_FIELDS = new Set(["name", "tier", "series", "created_at"]);
+    const sortField = sortBy && SORTABLE_FIELDS.has(sortBy) ? sortBy : "created_at";
+    const dir = sortDir === "asc" ? 1 : -1;
+    const sortSpec: Record<string, 1 | -1> = { [sortField]: dir, _id: 1 };
+
+    const [total, docs] = await Promise.all([
+      col("cards").countDocuments(filter),
+      col("cards").find(filter).sort(sortSpec).skip(skip).limit(limit).toArray(),
+    ]);
+
+    if (total === 0) {
+      res.json({ cards: [], total: 0, page, limit, pages: 0 });
       return;
     }
 
-    const raw = fs.readFileSync(CARDS_JSON_PATH, "utf8");
-    const data = JSON.parse(raw);
-    let cards: any[] = data.cards || [];
-
-    const { tier, search, page: pageStr, limit: limitStr } = req.query as Record<string, string | undefined>;
-
-    // Filter by tier
-    if (tier && tier !== "all") {
-      cards = cards.filter((c: any) => c.tier === tier);
-    }
-
-    // Filter by name/series search
-    if (search) {
-      const q = search.toLowerCase();
-      cards = cards.filter((c: any) =>
-        (c.name || "").toLowerCase().includes(q) ||
-        (c.series || "").toLowerCase().includes(q)
-      );
-    }
-
-    const total = cards.length;
-    const limit = Math.min(Math.max(parseInt(limitStr || "10", 10) || 10, 1), 200);
-    const page  = Math.max(parseInt(pageStr || "1", 10) || 1, 1);
-    const start = (page - 1) * limit;
-    const paginated = cards.slice(start, start + limit);
-
-    const result = paginated.map((c: any) => {
-      const isAnimated = ANIMATED_TIERS.has(c.tier) || c.is_animated === true || c.is_animated === 1;
-      const hasWebm = !!c.has_webm;
-
-      // Direct Shoob CDN URL for the media
-      const rawUrl = c.media_url ||
-        (c.shoob_id
-          ? (hasWebm
-            ? `https://api.shoob.gg/site/api/cardr/${c.shoob_id}?type=webm`
-            : `https://api.shoob.gg/site/api/cardr/${c.shoob_id}?size=400`)
-          : "");
-
-      // Shoob serves GIFs for ALL animated cards — even ?type=webm URLs return GIFs.
-      // Use the URL directly in an <img> tag. GIFs animate automatically.
-      // Never proxy: Render datacenter IPs may be blocked by Shoob.
-      const imageUrl = rawUrl;
-
-      return {
-        id: c.shoob_id || c.id || "",
-        shoob_id: c.shoob_id || "",
-        name: c.name || "Unknown",
-        tier: c.tier || "T1",
-        series: c.series || "General",
-        description: "",
-        imageUrl,
-        isAnimated,
-        isVideo: false,  // always false — use <img> for all cards, GIFs animate natively
-        totalCopies: 0,
-        owners: [],
-        ownerName: "Unclaimed",
-        ownerId: null,
-        source: "cards.json",
-      };
-    });
-
-    res.json({
-      cards: result,
-      total,
-      page,
-      limit,
-      pages: Math.ceil(total / limit),
-      source: "cards.json",
-    });
+    const cards = docs.map(mongoDocToFrontendCard);
+    res.json({ cards, total, page, limit, pages: Math.ceil(total / limit) });
   } catch (err: any) {
-    logger.error({ err }, "Error reading cards.json for from-json route");
-    res.status(500).json({ success: false, message: "Failed to read cards.json", cards: [], total: 0 });
+    logger.error({ err }, "Error reading cards from MongoDB");
+    res.status(500).json({ success: false, message: "Failed to read cards", cards: [], total: 0 });
   }
 });
 
-// ── Card detail by shoob_id or internal id ────────────────────────────────────
-// GET /api/v1/cards/detail/:id
-// Returns full owners list + issue count for the card detail modal
-router.get("/detail/:id", (req, res) => {
+// ── Card detail ───────────────────────────────────────────────────────────────
+router.get("/detail/:id", async (req, res) => {
   const { id } = req.params;
   if (!id) { res.status(400).json({ error: "id required" }); return; }
 
-  const db = getDb();
+  let card = await col("cards").findOne({
+    $or: [{ shoob_id: id }, { mazoku_id: id }, { _id: id }],
+  });
 
-  // Try shoob_id first (what cards.json uses), then internal id
-  let card: any = db.prepare("SELECT * FROM cards WHERE shoob_id = ?").get(id);
-  if (!card) card = db.prepare("SELECT * FROM cards WHERE id = ?").get(id);
+  const imageUrl = card ? getCardImageUrl(card) : `https://api.shoob.gg/site/api/cardr/${id}?size=400`;
+  const internalId = card?._id as string | undefined;
 
-  const imageUrl = card ? getCardImageUrl(card) : (() => {
-    // Card not in DB yet — build CDN URL directly from the provided id (treated as shoob_id)
-    return `https://api.shoob.gg/site/api/cardr/${id}?size=400`;
-  })();
+  let owners: { id: string; name: string }[] = [];
+  let totalCopies = 0;
+  if (internalId) {
+    const [ownerList, count] = await Promise.all([
+      getCardOwners(internalId, 50),
+      getCardCopyCount(internalId),
+    ]);
+    owners = ownerList;
+    totalCopies = count;
+  }
 
-  const internalId = card?.id;
-
-  // Fetch all owners from user_cards (up to 50)
-  const owners = internalId
-    ? (db.prepare(`
-        SELECT DISTINCT u.id, u.name
-        FROM user_cards uc
-        JOIN users u ON u.id = uc.user_id
-        WHERE uc.card_id = ?
-        ORDER BY uc.obtained_at ASC
-        LIMIT 50
-      `).all(internalId) as any[]).map((o: any) => ({ id: o.id, name: o.name || "Shadow" }))
-    : [];
-
-  const totalCopies = internalId
-    ? ((db.prepare("SELECT COUNT(*) as cnt FROM user_cards WHERE card_id = ?").get(internalId) as any)?.cnt || 0)
-    : 0;
-
-  // Also pull from cards.json for description/name if DB record missing
-  let jsonCard: any = null;
-  try {
-    if (fs.existsSync(CARDS_JSON_PATH)) {
-      const raw = fs.readFileSync(CARDS_JSON_PATH, "utf8");
-      const data = JSON.parse(raw);
-      jsonCard = (data.cards || []).find((c: any) => c.shoob_id === id || c.id === id) || null;
-    }
-  } catch {}
-
+  const detailTier = card?.tier || "";
+  const detailIsAnimated = ANIMATED_TIERS.has(detailTier);
   res.json({
-    id: card?.shoob_id || jsonCard?.shoob_id || id,
-    name: card?.name || jsonCard?.name || "Unknown Card",
-    tier: card?.tier || jsonCard?.tier || "T1",
-    series: card?.series || jsonCard?.series || "General",
-    description: card?.description || jsonCard?.description || "",
+    id: card?.shoob_id || id,
+    name: card?.name || "Unknown Card",
+    tier: detailTier,
+    series: card?.series || "General",
+    description: card?.description || "",
     imageUrl,
-    isAnimated: ANIMATED_TIERS.has(card?.tier || jsonCard?.tier || ""),
+    isAnimated: detailIsAnimated,
+    isVideo: detailIsAnimated && !!card?.image_data,
     totalCopies,
     owners,
   });
 });
 
-// ── Trigger cards.json → DB loader on-demand (no auth required for health) ───
-// POST /api/v1/cards/reload-from-json
-// Allows the web UI or an ops engineer to re-trigger the cards.json → SQLite sync
-// without restarting the server.
+// ── Reload cards from JSON ────────────────────────────────────────────────────
 router.post("/reload-from-json", requireAuth, async (req: AuthRequest, res) => {
   try {
     const { loadCardsFromRepo } = await import("../../bot/cards-loader.js");
@@ -228,12 +241,7 @@ router.post("/reload-from-json", requireAuth, async (req: AuthRequest, res) => {
   }
 });
 
-
-// ── Media proxy — pipes Shoob CDN media through our server so browser CORS is satisfied ──
-// GET /api/v1/cards/media-proxy?url=ENCODED_URL
-// Without this, browsers block <video> tags pointing at api.shoob.gg because Shoob
-// does not send Access-Control-Allow-Origin headers on video responses.
-// Only proxies URLs from api.shoob.gg for security.
+// ── Media proxy ───────────────────────────────────────────────────────────────
 router.get("/media-proxy", (req, res) => {
   const raw = req.query.url as string;
   if (!raw) { res.status(400).send("Missing url"); return; }
@@ -247,7 +255,6 @@ router.get("/media-proxy", (req, res) => {
     res.status(403).send("Forbidden"); return;
   }
 
-  // Follow up to 5 redirects so Shoob CDN redirect chains don't silently fail
   function fetchWithRedirects(url: URL, redirectsLeft: number) {
     const lib = url.protocol === "https:" ? https : http;
     const req2 = lib.get(url.toString(), {
@@ -258,18 +265,15 @@ router.get("/media-proxy", (req, res) => {
     }, (upstream) => {
       const status = upstream.statusCode || 200;
 
-      // Follow redirect
       if ((status === 301 || status === 302 || status === 303 || status === 307 || status === 308)
           && upstream.headers.location && redirectsLeft > 0) {
-        upstream.resume(); // drain the body
+        upstream.resume();
         let nextUrl: URL;
         try { nextUrl = new URL(upstream.headers.location, url.toString()); } catch {
           if (!res.headersSent) res.status(502).send("Bad redirect");
           return;
         }
-        // Only follow redirects within shoob.gg for safety
         if (!nextUrl.hostname.endsWith("shoob.gg") && !nextUrl.hostname.endsWith("cdn.shoob.gg")) {
-          // Non-shoob redirect — pipe the original response as-is
           if (!res.headersSent) res.status(502).send("Redirect outside shoob");
           return;
         }
@@ -300,17 +304,15 @@ router.get("/media-proxy", (req, res) => {
   fetchWithRedirects(target, 5);
 });
 
-// Serve card media BLOB from the database (image or video for animated tiers)
-router.get("/:id/image", (req, res) => {
-  const db = getDb();
-  const card = db.prepare("SELECT image_data, tier FROM cards WHERE id = ?").get(req.params.id) as any;
-  if (!card?.image_data) {
-    res.status(404).end();
-    return;
-  }
+// ── Card image blob ───────────────────────────────────────────────────────────
+router.get("/:id/image", async (req, res) => {
+  const card = await col("cards").findOne({ _id: req.params.id });
+  if (!card?.image_data) { res.status(404).end(); return; }
+
   const isAnimated = ANIMATED_TIERS.has(card.tier);
   const contentType = isAnimated ? "video/mp4" : "image/jpeg";
-  const buf: Buffer = Buffer.isBuffer(card.image_data) ? card.image_data : Buffer.from(card.image_data);
+  const buf = toImageBuffer(card.image_data);
+  if (!buf) { res.status(404).end(); return; }
   const total = buf.length;
 
   res.setHeader("Content-Type", contentType);
@@ -336,113 +338,81 @@ router.get("/:id/image", (req, res) => {
   res.end(buf);
 });
 
-function getCardCopyCount(db: any, cardId: string): number {
-  const row = db.prepare("SELECT COUNT(*) as cnt FROM user_cards WHERE card_id = ?").get(cardId) as any;
-  return row?.cnt || 0;
-}
-
-function getCardOwner(db: any, cardId: string): { name: string; id: string } | null {
-  const row = db.prepare(`
-    SELECT u.id, u.name FROM user_cards uc
-    JOIN users u ON u.id = uc.user_id
-    WHERE uc.card_id = ?
-    ORDER BY uc.obtained_at ASC LIMIT 1
-  `).get(cardId) as any;
-  return row ? { id: row.id, name: row.name || "Unknown" } : null;
-}
-
-router.get("/", optionalAuth, (req, res) => {
-  const db = getDb();
+// ── List all cards ────────────────────────────────────────────────────────────
+router.get("/", optionalAuth, async (req, res) => {
   const { tier, series } = req.query as { tier?: string; series?: string };
 
-  let query = "SELECT * FROM cards";
-  const params: any[] = [];
-  const conditions: string[] = [];
+  const filter: any = {};
+  if (tier) filter.tier = tier;
+  if (series) filter.series = { $regex: series, $options: "i" };
 
-  if (tier) {
-    conditions.push("tier = ?");
-    params.push(tier);
-  }
-  if (series) {
-    conditions.push("LOWER(series) LIKE LOWER(?)");
-    params.push(`%${series}%`);
-  }
-  if (conditions.length > 0) {
-    query += " WHERE " + conditions.join(" AND ");
-  }
-  query += " ORDER BY tier, name";
+  const cards = await col("cards").find(filter).sort({ tier: 1, name: 1 }).toArray();
 
-  const cards = db.prepare(query).all(...params) as any[];
-
-  const result = cards.map((card: any) => {
-    const owner = getCardOwner(db, card.id);
-    const totalCopies = getCardCopyCount(db, card.id);
-    const owners = db.prepare(`
-      SELECT DISTINCT u.id, u.name FROM user_cards uc
-      JOIN users u ON u.id = uc.user_id
-      WHERE uc.card_id = ?
-      LIMIT 5
-    `).all(card.id) as any[];
+  const result = await Promise.all(cards.map(async (card: any) => {
+    const [owner, totalCopies, owners] = await Promise.all([
+      getCardOwner(card._id),
+      getCardCopyCount(card._id),
+      getCardOwners(card._id, 5),
+    ]);
     const isAnimated = ANIMATED_TIERS.has(card.tier);
+    const isVideo = isAnimated && !!card.image_data;
     return {
-      id: card.id,
+      id: card._id,
       name: card.name,
       tier: card.tier,
       series: card.series || "General",
       description: card.description || "",
       imageUrl: getCardImageUrl(card),
       isAnimated,
+      isVideo,
       totalCopies,
       ownerName: owner?.name || "Unclaimed",
       ownerId: owner?.id || null,
-      owners: owners.map((o: any) => ({ id: o.id, name: o.name || "Shadow" })),
+      owners,
     };
-  });
+  }));
 
   res.json({ cards: result, total: result.length });
 });
 
-router.get("/my", requireAuth, (req: AuthRequest, res) => {
-  const db = getDb();
-  const userCards = db.prepare(`
-    SELECT uc.id as user_card_id, uc.obtained_at, c.*
-    FROM user_cards uc
-    JOIN cards c ON c.id = uc.card_id
-    WHERE uc.user_id = ?
-    ORDER BY uc.obtained_at DESC
-  `).all(req.userId!) as any[];
+// ── My cards ──────────────────────────────────────────────────────────────────
+router.get("/my", requireAuth, async (req: AuthRequest, res) => {
+  const userId = req.userId!;
+  const userCards = await getUserCards(userId);
 
-  const result = userCards.map((uc: any) => {
-    const totalCopies = getCardCopyCount(db, uc.id);
-    const owners = db.prepare(`
-      SELECT DISTINCT u.id, u.name FROM user_cards ucc
-      JOIN users u ON u.id = ucc.user_id
-      WHERE ucc.card_id = ?
-      LIMIT 5
-    `).all(uc.id) as any[];
-    const isAnimated = ANIMATED_TIERS.has(uc.tier);
+  const result = await Promise.all(userCards.map(async (uc: any) => {
+    const cardId = uc.card_id || uc.id;
+    const card = await col("cards").findOne({ _id: cardId });
+    const [totalCopies, owners] = await Promise.all([
+      getCardCopyCount(cardId),
+      getCardOwners(cardId, 5),
+    ]);
+    const isAnimated = ANIMATED_TIERS.has(uc.tier || card?.tier || "");
+    const isVideo = isAnimated && !!card?.image_data;
     return {
-      userCardId: uc.user_card_id,
+      userCardId: uc._id?.toString() || uc.copy_id || uc.user_card_id,
       card: {
-        id: uc.id,
-        name: uc.name,
-        tier: uc.tier,
-        series: uc.series || "General",
-        description: uc.description || "",
-        imageUrl: getCardImageUrl({ ...uc, id: uc.id }),
+        id: cardId,
+        name: uc.name || card?.name || "Unknown",
+        tier: uc.tier || card?.tier || "T1",
+        series: uc.series || card?.series || "General",
+        description: uc.description || card?.description || "",
+        imageUrl: card ? getCardImageUrl(card) : "",
         isAnimated,
+        isVideo,
         totalCopies,
         ownerName: req.user?.name || "You",
-        ownerId: req.userId,
-        owners: owners.map((o: any) => ({ id: o.id, name: o.name || "Shadow" })),
+        ownerId: userId,
+        owners,
       },
       obtainedAt: uc.obtained_at || 0,
     };
-  });
+  }));
 
   res.json({ cards: result, total: result.length });
 });
 
+// ── Wishlist / trade notification ─────────────────────────────────────────────
 router.post("/wishlist", requireAuth, async (req: AuthRequest, res) => {
   const { cardId } = req.body as { cardId?: string };
   if (!cardId) {
@@ -450,24 +420,13 @@ router.post("/wishlist", requireAuth, async (req: AuthRequest, res) => {
     return;
   }
 
-  const db = getDb();
-  // The frontend's card list (/from-json) sends shoob_id as the card's "id"
-  // for every Shoob-sourced card (the vast majority), since that's what
-  // cards.json keys cards by. The SQL `cards` table instead uses its own
-  // internally-generated random id as the primary key, with shoob_id stored
-  // in a separate column. Look up by shoob_id first — that's what the
-  // wishlist button is actually sending — and fall back to the internal id
-  // for manually-uploaded cards that have no shoob_id.
-  const card = (
-    db.prepare("SELECT * FROM cards WHERE shoob_id = ?").get(cardId) ||
-    db.prepare("SELECT * FROM cards WHERE id = ?").get(cardId)
-  ) as any;
+  const card = await col("cards").findOne({ $or: [{ shoob_id: cardId }, { _id: cardId }] });
   if (!card) {
     res.status(404).json({ success: false, message: "Card not found" });
     return;
   }
 
-  const owner = getCardOwner(db, card.id);
+  const owner = await getCardOwner(card._id as string);
   if (!owner) {
     res.json({ success: true, message: "Card is unclaimed — no owner to notify" });
     return;
@@ -488,15 +447,121 @@ router.post("/wishlist", requireAuth, async (req: AuthRequest, res) => {
   res.json({ success: true, message: "Trade notification sent to card owner" });
 });
 
-// ── Web card upload (staff only) ────────────────────────────────────────────
-// POST /api/v1/cards/upload  — multipart: file (image or video), tier, name, series
+// ── Card fusion ───────────────────────────────────────────────────────────────
+router.post("/fuse", requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    if (!userId) { res.status(401).json({ success: false, message: "Not authenticated" }); return; }
+
+    const FUSE_RECIPES: Record<string, { cost: number; next: string }> = {
+      T1: { cost: 10, next: "T2" },
+      T2: { cost: 8,  next: "T3" },
+      T3: { cost: 6,  next: "T4" },
+      T4: { cost: 5,  next: "T5" },
+      T5: { cost: 5,  next: "T6" },
+    };
+
+    const body = req.body as any;
+    const tierArg = (body?.tier || "").toUpperCase();
+    const selectedCardIds: string[] | undefined = Array.isArray(body?.cardIds) ? body.cardIds : undefined;
+
+    const recipe = FUSE_RECIPES[tierArg];
+    if (!recipe) {
+      res.status(400).json({ success: false, message: `Invalid tier "${tierArg}". Valid tiers: T1–T5` });
+      return;
+    }
+
+    const allUserCards = await getUserCards(userId);
+    const eligible = allUserCards.filter((c: any) => (c.tier || "") === tierArg && !c.lent_to);
+
+    let toDelete: any[];
+
+    if (selectedCardIds && selectedCardIds.length > 0) {
+      if (selectedCardIds.length !== recipe.cost) {
+        res.status(400).json({
+          success: false,
+          message: `You must select exactly ${recipe.cost} ${tierArg} cards to fuse. You selected ${selectedCardIds.length}.`,
+        });
+        return;
+      }
+      toDelete = selectedCardIds.map((copyId) => {
+        const card = eligible.find((c: any) => String(c.copy_id || c._id) === String(copyId));
+        return card || null;
+      });
+      const invalid = toDelete.filter((c) => !c);
+      if (invalid.length > 0) {
+        res.status(400).json({
+          success: false,
+          message: "One or more selected cards are invalid, not owned by you, wrong tier, or currently lent out.",
+        });
+        return;
+      }
+    } else {
+      if (eligible.length < recipe.cost) {
+        res.status(400).json({
+          success: false,
+          message: `Not enough cards. You need ${recipe.cost}× ${tierArg} but only have ${eligible.length} eligible (non-lent).`,
+          have: eligible.length,
+          need: recipe.cost,
+        });
+        return;
+      }
+      toDelete = eligible.slice(0, recipe.cost);
+    }
+
+    // Pick a random next-tier card
+    const nextCards = await col("cards").aggregate([
+      { $match: { tier: recipe.next } },
+      { $sample: { size: 1 } },
+    ]).toArray();
+    const nextCard = nextCards[0];
+
+    if (!nextCard) {
+      res.status(500).json({ success: false, message: `No ${recipe.next} cards exist in the database yet.` });
+      return;
+    }
+
+    // Burn the selected cards
+    for (const uc of toDelete) {
+      await deleteUserCardByCopyId(String(uc.copy_id || uc._id), userId);
+    }
+
+    // Grant the result card
+    const newCopyId = await giveCard(userId, String(nextCard._id));
+
+    const hasWebm = nextCard.has_webm === 1 || nextCard.has_webm === true;
+    const imageUrl = nextCard.shoob_id
+      ? (hasWebm
+        ? `https://api.shoob.gg/site/api/cardr/${nextCard.shoob_id}?type=webm`
+        : `https://api.shoob.gg/site/api/cardr/${nextCard.shoob_id}?size=400`)
+      : `/api/v1/cards/${nextCard._id}/image`;
+
+    res.json({
+      success: true,
+      burned: recipe.cost,
+      sourceTier: tierArg,
+      result: {
+        id: nextCard._id,
+        shoob_id: nextCard.shoob_id || "",
+        name: nextCard.name,
+        tier: nextCard.tier,
+        imageUrl,
+        copyId: newCopyId || "—",
+      },
+    });
+  } catch (err: any) {
+    logger.error({ err }, "Card fusion error");
+    res.status(500).json({ success: false, message: err?.message || "Fusion failed" });
+  }
+});
+
+// ── Web card upload (staff only) ──────────────────────────────────────────────
 router.post("/upload", requireAuth, uploadMem.single("file"), async (req: AuthRequest, res) => {
   try {
     const userId = req.user?.id;
     if (!userId) { res.status(401).json({ success: false, message: "Not authenticated" }); return; }
 
-    // Check staff / mod permission
-    const staffRow = getStaff(userId);
+    const staffRow = await getStaff(userId);
     const BOT_OWNER = (process.env["OWNER_NUMBERS"] || process.env["BOT_OWNER_LID"] || "2348144550593").split(",")[0].replace(/\D/g, "");
     const isStaff = !!staffRow || userId.replace(/\D/g, "") === BOT_OWNER;
     if (!isStaff) {
@@ -523,10 +588,9 @@ router.post("/upload", requireAuth, uploadMem.single("file"), async (req: AuthRe
       return;
     }
 
-    const db = getDb();
-    const existing = db.prepare("SELECT id FROM cards WHERE LOWER(name) = LOWER(?)").get(name) as any;
+    const existing = await col("cards").findOne({ name: { $regex: `^${name}$`, $options: "i" } });
     if (existing) {
-      res.status(409).json({ success: false, message: `A card named "${name}" already exists (ID: ${existing.id}).` });
+      res.status(409).json({ success: false, message: `A card named "${name}" already exists (ID: ${existing._id}).` });
       return;
     }
 
@@ -552,14 +616,25 @@ router.post("/upload", requireAuth, uploadMem.single("file"), async (req: AuthRe
           .resize(800, 1100, { fit: "inside", withoutEnlargement: true })
           .jpeg({ quality: 92 })
           .toBuffer();
-      } catch { /* sharp not available or unsupported format — use raw */ }
+      } catch { /* sharp not available — use raw */ }
     }
 
-    const result = db.prepare(
-      "INSERT INTO cards (name, series, tier, image_data, is_animated, uploaded_by) VALUES (?, ?, ?, ?, ?, ?)"
-    ).run(name, series, tier, imageData, isAnimated ? 1 : 0, userId);
+    // Generate unique card ID
+    const { randomBytes } = await import("crypto");
+    const ID_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let cardId = "C" + Date.now().toString(36).toUpperCase();
+    for (let a = 0; a < 50; a++) {
+      const bytes = randomBytes(8);
+      const candidate = Array.from(bytes as Buffer).map((b: number) => ID_CHARS[b % ID_CHARS.length]).join("");
+      if (!(await col("cards").findOne({ _id: candidate }))) { cardId = candidate; break; }
+    }
 
-    const cardId = result.lastInsertRowid;
+    await col("cards").insertOne({
+      _id: cardId, name, series, tier,
+      image_data: imageData,
+      is_animated: isAnimated ? 1 : 0,
+      uploaded_by: userId,
+    });
 
     res.json({
       success: true,
@@ -572,20 +647,7 @@ router.post("/upload", requireAuth, uploadMem.single("file"), async (req: AuthRe
   }
 });
 
-
-// ── Shoob.gg card import (staff only) ────────────────────────────────────────
-// POST /api/v1/cards/fetch-cards
-// Body: { tier?, series?, limit? }
-//
-// Fetches cards from the Shoob.gg public API (https://api.shoob.gg).
-// Shoob card shape: { _id, id, name, slug, tier, category[], file, claim_count }
-//
-// Body params:
-//   tier   - "T1"–"T6", "TS", "TX", "TZ" to filter by tier (optional)
-//   series - override series label for all imported cards (optional)
-//   limit  - max cards to import, 1–200 (default 20)
-
-// Normalise Shoob tier field ("1"→"T1", "S"→"TS", etc.)
+// ── Normalise Shoob tier ──────────────────────────────────────────────────────
 function normaliseShoobTier(raw: string | number | undefined, fallback = "T1"): string {
   if (raw === null || raw === undefined) return fallback;
   const s = String(raw).trim().toUpperCase();
@@ -597,21 +659,22 @@ function normaliseShoobTier(raw: string | number | undefined, fallback = "T1"): 
   return fallback;
 }
 
-// Sync-log stats route: shows recent .pullcards / .synccards run history
+// ── Sync log ──────────────────────────────────────────────────────────────────
 router.get("/sync-log", requireAuth, async (req: AuthRequest, res) => {
   try {
     const userId = req.user?.id;
     if (!userId) { res.status(401).json({ success: false, message: "Not authenticated" }); return; }
-    const staffRow = getStaff(userId);
+    const staffRow = await getStaff(userId);
     const BOT_OWNER = (process.env["OWNER_NUMBERS"] || process.env["BOT_OWNER_PHONE"] || "2348144550593").split(",")[0].replace(/\D/g, "");
     const isStaff = !!staffRow || userId.replace(/\D/g, "") === BOT_OWNER;
     if (!isStaff) { res.status(403).json({ success: false, message: "Only staff can view sync logs." }); return; }
 
-    const db = getDb();
-    const logs = db.prepare("SELECT * FROM shoob_sync_log ORDER BY ran_at DESC LIMIT 20").all();
-    const totalCards  = (db.prepare("SELECT COUNT(*) as cnt FROM cards").get() as any)?.cnt || 0;
-    const shoobCards  = (db.prepare("SELECT COUNT(*) as cnt FROM cards WHERE source = 'shoob'").get() as any)?.cnt || 0;
-    const trackedIds  = (db.prepare("SELECT COUNT(*) as cnt FROM shoob_imported_ids").get() as any)?.cnt || 0;
+    const [logs, totalCards, shoobCards, trackedIds] = await Promise.all([
+      col("shoob_sync_log").find({}).sort({ ran_at: -1 }).limit(20).toArray(),
+      col("cards").countDocuments({}),
+      col("cards").countDocuments({ source: "shoob" }),
+      col("shoob_imported_ids").countDocuments({}),
+    ]);
     res.json({ success: true, logs, totalCards, shoobCards, trackedIds });
   } catch (err: any) {
     logger.error({ err }, "Sync log error");
@@ -619,12 +682,13 @@ router.get("/sync-log", requireAuth, async (req: AuthRequest, res) => {
   }
 });
 
+// ── Fetch cards from Shoob API ────────────────────────────────────────────────
 router.post("/fetch-cards", requireAuth, async (req: AuthRequest, res) => {
   try {
     const userId = req.user?.id;
     if (!userId) { res.status(401).json({ success: false, message: "Not authenticated" }); return; }
 
-    const staffRow = getStaff(userId);
+    const staffRow = await getStaff(userId);
     const BOT_OWNER = (process.env["OWNER_NUMBERS"] || process.env["BOT_OWNER_PHONE"] || "2348144550593").split(",")[0].replace(/\D/g, "");
     const isStaff = !!staffRow || userId.replace(/\D/g, "") === BOT_OWNER;
     if (!isStaff) { res.status(403).json({ success: false, message: "Only staff can import cards." }); return; }
@@ -640,10 +704,6 @@ router.post("/fetch-cards", requireAuth, async (req: AuthRequest, res) => {
     const seriesOverride = ((req.body?.series || "") as string).trim();
     const limit = Math.min(parseInt(req.body?.limit || "20", 10) || 20, 200);
 
-    const db = getDb();
-
-    // Paginate Shoob until we collect enough matching cards.
-    // Shoob ignores limit= and always returns 15 cards per page.
     const collected: any[] = [];
     let page = 1;
     while (collected.length < limit) {
@@ -664,7 +724,6 @@ router.post("/fetch-cards", requireAuth, async (req: AuthRequest, res) => {
       for (const c of pageCards) {
         const cardTier = normaliseShoobTier(c.tier);
         if (tier && cardTier !== tier) continue;
-        // Filter by anime/category if provided
         if (req.body?.anime) {
           const animeQuery = (req.body.anime as string).trim().toLowerCase();
           const cats = Array.isArray(c.category) ? c.category.map((x: string) => String(x).toLowerCase()) : [];
@@ -695,14 +754,12 @@ router.post("/fetch-cards", requireAuth, async (req: AuthRequest, res) => {
     const errors: string[] = [];
 
     for (const sc of collected) {
-      // Shoob shape: { _id, id, name, slug, tier, category[], file }
       const shoobId: string = String(sc._id || sc.id || "").trim();
       const cardName: string = (sc.name || sc.slug || shoobId).trim().replace(/_/g, " ");
       if (!cardName || cardName.length < 2) { skipped++; continue; }
 
-      // Skip if already in DB by shoob_id or name
-      const existsByShoobId = shoobId ? db.prepare("SELECT 1 FROM cards WHERE shoob_id = ?").get(shoobId) : null;
-      const existsByName = db.prepare("SELECT 1 FROM cards WHERE LOWER(name) = LOWER(?)").get(cardName);
+      const existsByShoobId = shoobId ? await col("cards").findOne({ shoob_id: shoobId }) : null;
+      const existsByName = await col("cards").findOne({ name: { $regex: `^${cardName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: "i" } });
       if (existsByShoobId || existsByName) { skipped++; continue; }
 
       const cardTier = normaliseShoobTier(sc.tier, tier || "T1");
@@ -719,19 +776,17 @@ router.post("/fetch-cards", requireAuth, async (req: AuthRequest, res) => {
         ANIMATED_TIERS.has(cardTier)
       ) ? 1 : 0;
 
-      // Build correct media URL — WebM if available, else the card render endpoint
       const mediaUrl = isWebm
         ? `${SHOOB_API}/site/api/cardr/${shoobId}?type=webm`
         : `${SHOOB_API}/site/api/cardr/${shoobId}?size=400`;
 
-      // Generate unique local card ID
       const { randomBytes } = await import("crypto");
       const idChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
       let localId = "C" + Date.now().toString(36).toUpperCase();
       for (let a = 0; a < 50; a++) {
         const bytes = randomBytes(8);
         const candidate = Array.from(bytes as Buffer).map((b: number) => idChars[b % idChars.length]).join("");
-        if (!db.prepare("SELECT 1 FROM cards WHERE id = ?").get(candidate)) { localId = candidate; break; }
+        if (!(await col("cards").findOne({ _id: candidate }))) { localId = candidate; break; }
       }
 
       let imageData: Buffer | null = null;
@@ -744,16 +799,11 @@ router.post("/fetch-cards", requireAuth, async (req: AuthRequest, res) => {
           if (mediaRes.ok) {
             const buf = Buffer.from(await mediaRes.arrayBuffer());
             if (!isWebm && !isGif) {
-              // Static image — normalise via sharp
               try {
                 const sharp = (await import("sharp")).default;
-                imageData = await sharp(buf)
-                  .resize(800, 1100, { fit: "inside", withoutEnlargement: true })
-                  .jpeg({ quality: 92 })
-                  .toBuffer();
+                imageData = await sharp(buf).resize(800, 1100, { fit: "inside", withoutEnlargement: true }).jpeg({ quality: 92 }).toBuffer();
               } catch { imageData = buf; }
             } else {
-              // GIF / WebM — store as-is
               imageData = buf;
             }
           }
@@ -762,14 +812,18 @@ router.post("/fetch-cards", requireAuth, async (req: AuthRequest, res) => {
         }
       }
 
-      db.prepare(
-        "INSERT INTO cards (id, name, series, tier, image_data, is_animated, uploaded_by, source, shoob_id) VALUES (?, ?, ?, ?, ?, ?, ?, 'shoob', ?)"
-      ).run(localId, cardName, cardSeries, cardTier, imageData, cardIsAnimated, userId, shoobId || null);
+      await col("cards").insertOne({
+        _id: localId, name: cardName, series: cardSeries, tier: cardTier,
+        image_data: imageData, is_animated: cardIsAnimated,
+        uploaded_by: userId, source: "shoob", shoob_id: shoobId || null,
+      });
 
       if (shoobId) {
-        db.prepare(
-          "INSERT OR IGNORE INTO shoob_imported_ids (shoob_id, local_card_id) VALUES (?, ?)"
-        ).run(shoobId, localId);
+        await col("shoob_imported_ids").updateOne(
+          { shoob_id: shoobId },
+          { $setOnInsert: { shoob_id: shoobId, local_card_id: localId } },
+          { upsert: true }
+        );
       }
       imported++;
     }
@@ -777,10 +831,7 @@ router.post("/fetch-cards", requireAuth, async (req: AuthRequest, res) => {
     res.json({
       success: true,
       message: `Import complete: ${imported} imported, ${skipped} skipped${errors.length ? ` (${errors.length} image errors)` : ""}.`,
-      imported,
-      skipped,
-      total_available: collected.length,
-      errors: errors.slice(0, 10),
+      imported, skipped, total_available: collected.length, errors: errors.slice(0, 10),
     });
   } catch (err: any) {
     logger.error({ err }, "Card fetch error");
@@ -790,26 +841,23 @@ router.post("/fetch-cards", requireAuth, async (req: AuthRequest, res) => {
 
 export { router as cardsRouter };
 
-
-// ── Shoob Sync Log routes ────────────────────────────────────────────────────
-// GET /api/v1/cards/scraper/status  — returns Shoob sync summary & DB counts
-// GET /api/v1/cards/scraper/history — returns last 20 sync run records
-// POST /api/v1/cards/scraper/run    — triggers an incremental Shoob sync
+// ── Scraper routes ────────────────────────────────────────────────────────────
 
 router.get("/scraper/status", requireAuth, async (req: AuthRequest, res) => {
   try {
     const userId = req.user?.id;
     if (!userId) { res.status(401).json({ success: false, message: "Not authenticated" }); return; }
-    const staffRow = getStaff(userId);
+    const staffRow = await getStaff(userId);
     const BOT_OWNER = (process.env["OWNER_NUMBERS"] || process.env["BOT_OWNER_PHONE"] || "2348144550593").split(",")[0].replace(/\D/g, "");
     const isStaff = !!staffRow || userId.replace(/\D/g, "") === BOT_OWNER;
     if (!isStaff) { res.status(403).json({ success: false, message: "Only staff can view sync status." }); return; }
 
-    const db = getDb();
-    const totalCards  = (db.prepare("SELECT COUNT(*) as cnt FROM cards").get() as any)?.cnt ?? 0;
-    const shoobCards  = (db.prepare("SELECT COUNT(*) as cnt FROM cards WHERE source = 'shoob'").get() as any)?.cnt ?? 0;
-    const trackedIds  = (db.prepare("SELECT COUNT(*) as cnt FROM shoob_imported_ids").get() as any)?.cnt ?? 0;
-    const lastRun     = db.prepare("SELECT ran_at, run_type FROM shoob_sync_log ORDER BY ran_at DESC LIMIT 1").get() as any;
+    const [totalCards, shoobCards, trackedIds, lastRun] = await Promise.all([
+      col("cards").countDocuments({}),
+      col("cards").countDocuments({ source: "shoob" }),
+      col("shoob_imported_ids").countDocuments({}),
+      col("shoob_sync_log").findOne({}, { sort: { ran_at: -1 } }),
+    ]);
 
     res.json({
       source: "shoob.gg",
@@ -817,8 +865,8 @@ router.get("/scraper/status", requireAuth, async (req: AuthRequest, res) => {
       total_cards: totalCards,
       shoob_cards: shoobCards,
       tracked_ids: trackedIds,
-      last_run: lastRun ? new Date(lastRun.ran_at * 1000).toISOString() : null,
-      last_run_type: lastRun?.run_type ?? null,
+      last_run: lastRun ? new Date((lastRun as any).ran_at * 1000).toISOString() : null,
+      last_run_type: (lastRun as any)?.run_type ?? null,
     });
   } catch (err: any) {
     logger.error({ err }, "Scraper status error");
@@ -830,13 +878,12 @@ router.get("/scraper/history", requireAuth, async (req: AuthRequest, res) => {
   try {
     const userId = req.user?.id;
     if (!userId) { res.status(401).json({ success: false, message: "Not authenticated" }); return; }
-    const staffRow = getStaff(userId);
+    const staffRow = await getStaff(userId);
     const BOT_OWNER = (process.env["OWNER_NUMBERS"] || process.env["BOT_OWNER_PHONE"] || "2348144550593").split(",")[0].replace(/\D/g, "");
     const isStaff = !!staffRow || userId.replace(/\D/g, "") === BOT_OWNER;
     if (!isStaff) { res.status(403).json({ success: false, message: "Only staff can view sync history." }); return; }
 
-    const db = getDb();
-    const logs = db.prepare("SELECT * FROM shoob_sync_log ORDER BY ran_at DESC LIMIT 20").all() as any[];
+    const logs = await col("shoob_sync_log").find({}).sort({ ran_at: -1 }).limit(20).toArray();
     const result = logs.map((r: any) => ({
       timestamp: new Date(r.ran_at * 1000).toISOString(),
       run_type: r.run_type,
@@ -860,46 +907,39 @@ router.post("/scraper/run", requireAuth, async (req: AuthRequest, res) => {
   try {
     const userId = req.user?.id;
     if (!userId) { res.status(401).json({ success: false, message: "Not authenticated" }); return; }
-    const staffRow = getStaff(userId);
+    const staffRow = await getStaff(userId);
     const BOT_OWNER = (process.env["OWNER_NUMBERS"] || process.env["BOT_OWNER_PHONE"] || "2348144550593").split(",")[0].replace(/\D/g, "");
     const isStaff = !!staffRow || userId.replace(/\D/g, "") === BOT_OWNER;
     if (!isStaff) { res.status(403).json({ success: false, message: "Only staff can trigger sync." }); return; }
 
-    const db = getDb();
     const runMode = (req.body?.mode === "full") ? "full" : "incremental";
     const uploader = userId.replace(/\D/g, "");
 
-    // ── Try Playwright scraper first (architecture-compliant) ──────────────
+    // ── Try Playwright scraper first ──────────────────────────────────────
     try {
       const { runPlaywrightScraper } = await import("../../scraper/shoob-playwright.js");
       const result = await runPlaywrightScraper({
         syncOnly: runMode === "incremental",
         uploader,
-        onProgress: undefined, // web-triggered: no streaming progress
-        maxPage: runMode === "incremental" ? 100 : undefined, // cap incremental web runs
+        onProgress: undefined,
+        maxPage: runMode === "incremental" ? 100 : undefined,
       });
 
       res.json({
-        success: true,
-        method: "playwright",
-        mode: runMode,
-        imported: result.imported,
-        updated: result.updated,
-        skipped: result.skipped,
-        errors: result.errors,
-        total_seen: result.totalSeen,
-        pages_scraped: result.pagesScraped,
-        duration_ms: result.durationMs,
+        success: true, method: "playwright", mode: runMode,
+        imported: result.imported, updated: result.updated, skipped: result.skipped,
+        errors: result.errors, total_seen: result.totalSeen,
+        pages_scraped: result.pagesScraped, duration_ms: result.durationMs,
       });
       return;
     } catch (pwErr: any) {
       logger.warn({ pwErr }, "Playwright unavailable for web scraper/run — using REST fallback");
     }
 
-    // ── REST API fallback ──────────────────────────────────────────────────
+    // ── REST API fallback ─────────────────────────────────────────────────
     let imported = 0, updated = 0, skipped = 0, errors = 0, totalSeen = 0;
     let page = 1;
-    const idChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    const ID_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     const normTier = (raw: any, fb = "T1"): string => {
       if (!raw) return fb;
       const s = String(raw).trim().toUpperCase();
@@ -930,7 +970,7 @@ router.post("/scraper/run", requireAuth, async (req: AuthRequest, res) => {
           if (!shoobId) { skipped++; continue; }
 
           if (runMode === "incremental") {
-            const already = db.prepare("SELECT local_card_id FROM shoob_imported_ids WHERE shoob_id = ?").get(shoobId);
+            const already = await col("shoob_imported_ids").findOne({ shoob_id: shoobId });
             if (already) { skipped++; continue; }
           }
 
@@ -958,12 +998,17 @@ router.post("/scraper/run", requireAuth, async (req: AuthRequest, res) => {
           const hasWebp  = sc.has_webp ? 1 : 0;
           const slug     = sc.slug || "";
 
-          const existingByShoobId = db.prepare("SELECT id FROM cards WHERE shoob_id = ?").get(shoobId) as any;
+          const existingByShoobId = await col("cards").findOne({ shoob_id: shoobId });
           if (existingByShoobId) {
-            db.prepare("UPDATE cards SET name=?,tier=?,series=?,is_animated=?,raw_data=?,file_hash=?,has_webm=?,has_webp=?,slug=?,source='shoob' WHERE id=?")
-              .run(cardName, tier, series, animated, rawJson, fileHash, hasWebm, hasWebp, slug, existingByShoobId.id);
-            db.prepare("INSERT OR IGNORE INTO shoob_imported_ids (shoob_id, local_card_id) VALUES (?,?)")
-              .run(shoobId, existingByShoobId.id);
+            await col("cards").updateOne(
+              { _id: existingByShoobId._id },
+              { $set: { name: cardName, tier, series, is_animated: animated, raw_data: rawJson, file_hash: fileHash, has_webm: hasWebm, has_webp: hasWebp, slug, source: "shoob" } }
+            );
+            await col("shoob_imported_ids").updateOne(
+              { shoob_id: shoobId },
+              { $setOnInsert: { shoob_id: shoobId, local_card_id: existingByShoobId._id } },
+              { upsert: true }
+            );
             updated++;
             continue;
           }
@@ -991,14 +1036,18 @@ router.post("/scraper/run", requireAuth, async (req: AuthRequest, res) => {
           let localId = "C" + Date.now().toString(36).toUpperCase();
           for (let a = 0; a < 50; a++) {
             const bytes = randomBytes(8);
-            const cand = Array.from(bytes as Buffer).map((b: number) => idChars[b % idChars.length]).join("");
-            if (!db.prepare("SELECT 1 FROM cards WHERE id = ?").get(cand)) { localId = cand; break; }
+            const cand = Array.from(bytes as Buffer).map((b: number) => ID_CHARS[b % ID_CHARS.length]).join("");
+            if (!(await col("cards").findOne({ _id: cand }))) { localId = cand; break; }
           }
 
           try {
-            db.prepare("INSERT INTO cards (id,name,series,tier,image_data,is_animated,uploaded_by,source,shoob_id,raw_data,file_hash,has_webm,has_webp,slug) VALUES (?,?,?,?,?,?,?,'shoob',?,?,?,?,?,?)")
-              .run(localId, cardName, series, tier, imageData, animated, uploader, shoobId, rawJson, fileHash, hasWebm, hasWebp, slug);
-            db.prepare("INSERT OR IGNORE INTO shoob_imported_ids (shoob_id, local_card_id) VALUES (?,?)").run(shoobId, localId);
+            await col("cards").insertOne({
+              _id: localId, name: cardName, series, tier, image_data: imageData,
+              is_animated: animated, uploaded_by: uploader, source: "shoob",
+              shoob_id: shoobId, raw_data: rawJson, file_hash: fileHash,
+              has_webm: hasWebm, has_webp: hasWebp, slug,
+            });
+            await col("shoob_imported_ids").insertOne({ shoob_id: shoobId, local_card_id: localId });
             imported++;
           } catch { errors++; }
 
@@ -1013,23 +1062,102 @@ router.post("/scraper/run", requireAuth, async (req: AuthRequest, res) => {
     }
 
     const durationMs = Date.now() - startMs;
-    db.prepare(
-      "INSERT INTO shoob_sync_log (run_type, started_by, imported, updated, skipped, errors, total_seen, duration_ms, ran_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    ).run(`rest-${runMode}`, uploader, imported, updated, skipped, errors, totalSeen, durationMs, Math.floor(Date.now() / 1000));
+    await col("shoob_sync_log").insertOne({
+      run_type: `rest-${runMode}`, started_by: uploader,
+      imported, updated, skipped, errors, total_seen: totalSeen,
+      duration_ms: durationMs, ran_at: Math.floor(Date.now() / 1000),
+    });
 
     res.json({
-      success: true,
-      method: "rest-fallback",
-      mode: runMode,
-      imported,
-      updated,
-      skipped,
-      errors,
-      total_seen: totalSeen,
-      duration_ms: durationMs,
+      success: true, method: "rest-fallback", mode: runMode,
+      imported, updated, skipped, errors, total_seen: totalSeen, duration_ms: durationMs,
     });
   } catch (err: any) {
     logger.error({ err }, "Scraper run error");
     res.status(500).json({ success: false, message: err?.message || "Scraper run failed" });
+  }
+});
+
+// ── Mazoku cards from MongoDB (NOT from file — avoids loading 14k cards per request) ──
+const MAZOKU_TIER_CONFIG: Record<string, { label: string; order: number }> = {
+  "C":   { label: "Common",      order: 1 },
+  "R":   { label: "Rare",        order: 2 },
+  "SR":  { label: "Super Rare",  order: 3 },
+  "SSR": { label: "Super SR",    order: 4 },
+  "UR":  { label: "Ultra Rare",  order: 5 },
+  "EX":  { label: "Exclusive",   order: 6 },
+};
+
+// Reverse map: internal tier → Mazoku original tier (for filter conversion)
+const INTERNAL_TO_MAZOKU: Record<string, string> = { T2: "C", T4: "R", T5: "SR", T6: "SSR", TS: "UR" };
+
+router.get("/from-mazoku", async (req, res) => {
+  try {
+    const { tier, search, page: pageStr, limit: limitStr } = req.query as Record<string, string | undefined>;
+
+    const filter: any = { source: "mazoku" };
+
+    if (tier && tier !== "all") {
+      // Accept both Mazoku-native tier (C/R/SR) and internal tier (T2/T4/T5)
+      const internalTier = MAZOKU_TIER_MAP[tier] || tier;
+      filter.tier = internalTier;
+    }
+
+    if (search) {
+      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      filter.$or = [
+        { name: { $regex: escaped, $options: "i" } },
+        { series: { $regex: escaped, $options: "i" } },
+      ];
+    }
+
+    const limit = Math.min(Math.max(parseInt(limitStr || "10", 10) || 10, 1), 200);
+    const page  = Math.max(parseInt(pageStr || "1", 10) || 1, 1);
+    const skip  = (page - 1) * limit;
+
+    const [total, docs] = await Promise.all([
+      col("cards").countDocuments(filter),
+      col("cards").find(filter).sort({ tier: -1, name: 1 }).skip(skip).limit(limit).toArray(),
+    ]);
+
+    const result = docs.map((c: any) => {
+      const isAnimated = c.is_animated === 1 || c.is_animated === true;
+      const imageUrl = c.image_url || c.webp_url || `https://cdn7.mazoku.cc/cards/${c.mazoku_id}.webp`;
+      return {
+        id: c.mazoku_id || String(c._id),
+        mazoku_id: c.mazoku_id || "",
+        name: c.name || "Unknown",
+        tier: c.mazoku_original_tier || INTERNAL_TO_MAZOKU[c.tier] || c.tier || "C",
+        series: c.series || "General",
+        description: "",
+        imageUrl,
+        gifUrl: c.gif_url || null,
+        webmUrl: c.webm_url || null,
+        isAnimated,
+        source: "mazoku",
+        totalCopies: 0,
+        owners: [],
+        ownerName: "Unclaimed",
+        ownerId: null,
+      };
+    });
+
+    const tiers = Object.keys(MAZOKU_TIER_CONFIG);
+    res.json({ cards: result, total, page, limit, pages: Math.ceil(total / limit), source: "mazoku", tiers });
+  } catch (err: any) {
+    logger.error({ err }, "Error reading mazoku cards from MongoDB");
+    res.status(500).json({ success: false, message: "Failed to read mazoku cards", cards: [], total: 0 });
+  }
+});
+
+// ── Reload mazoku cards from JSON ─────────────────────────────────────────────
+router.post("/reload-mazoku", requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const { loadMazokuCards } = await import("../../bot/mazoku-cards-loader.js");
+    const stats = await loadMazokuCards();
+    res.json({ success: true, ...stats });
+  } catch (err: any) {
+    logger.error({ err }, "reload-mazoku error");
+    res.status(500).json({ success: false, message: err?.message || "Reload failed" });
   }
 });

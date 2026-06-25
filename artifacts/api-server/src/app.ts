@@ -49,8 +49,8 @@ if (publicDir) {
     res.sendFile(path.join(publicDir, "index.html"));
   });
 } else {
-  app.get("/", (_req, res) => {
-    res.json({ status: "ok", message: "Requiem Order API is running" });
+  app.use((_req, res) => {
+    res.json({ status: "ok", message: "Requiem Order API is running. Frontend not found — run the build step first." });
   });
 }
 

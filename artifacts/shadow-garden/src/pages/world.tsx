@@ -1,13 +1,101 @@
-import { Wind, Star, Compass, Eye, Zap } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Crown, MapPin, Loader2 } from "lucide-react";
+
+interface TerritoryOwner {
+  id: string;
+  name: string;
+  level: number;
+}
+
+interface Territory {
+  id: string;
+  name: string;
+  region: string;
+  resource: string;
+  baseIncome: number;
+  x: number;
+  y: number;
+  owner: TerritoryOwner | null;
+  claimedAt: number | null;
+  taxRate: number | null;
+  dangerLevel: number | null;
+}
+
+interface RegionInfo {
+  id: string;
+  name: string;
+  continent: string;
+}
+
+interface ContinentInfo {
+  id: string;
+  name: string;
+}
+
+async function fetchTerritories(): Promise<{ continents: ContinentInfo[]; regions: RegionInfo[]; territories: Territory[] }> {
+  const res = await fetch("/api/v1/territories");
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+// Deterministic color per guild id, so the same guild always shows the same
+// marker color everywhere on the map without needing a stored color field.
+const GUILD_PALETTE = [
+  { dot: "bg-amber-400",  ring: "border-amber-400/30",  text: "text-amber-400",  glow: "rgba(251,191,36,0.8)" },
+  { dot: "bg-primary",    ring: "border-primary/30",    text: "text-primary",    glow: "rgba(160,0,26,0.8)" },
+  { dot: "bg-teal-400",   ring: "border-teal-400/30",   text: "text-teal-400",   glow: "rgba(45,212,191,0.8)" },
+  { dot: "bg-sky-400",    ring: "border-sky-400/30",    text: "text-sky-400",    glow: "rgba(56,189,248,0.8)" },
+  { dot: "bg-violet-400", ring: "border-violet-400/30", text: "text-violet-400", glow: "rgba(167,139,250,0.8)" },
+  { dot: "bg-emerald-400", ring: "border-emerald-400/30", text: "text-emerald-400", glow: "rgba(52,211,153,0.8)" },
+  { dot: "bg-orange-400", ring: "border-orange-400/30", text: "text-orange-400", glow: "rgba(251,146,60,0.8)" },
+];
+const UNCLAIMED_STYLE = { dot: "bg-white/25", ring: "border-white/15", text: "text-white/50", glow: "rgba(255,255,255,0.25)" };
+
+function colorForGuild(guildId: string) {
+  let hash = 0;
+  for (let i = 0; i < guildId.length; i++) hash = (hash * 31 + guildId.charCodeAt(i)) >>> 0;
+  return GUILD_PALETTE[hash % GUILD_PALETTE.length];
+}
 
 export default function World() {
-  const REGIONS = [
-    { id: 1, name: "Requiem Order Capital",         desc: "The imperial capital. Heart of the Requiem Order, seat of Britannian power.", x: "50%", y: "38%", icon: Star,    colorClass: "text-amber-400",  dotClass: "bg-amber-400",  ringClass: "border-amber-400/30" },
-    { id: 2, name: "Skyward Sanctuary",     desc: "Our hidden base of operations. Concealed from the empire — only Requiem Order members may enter.", x: "22%", y: "65%", icon: Wind,    colorClass: "text-primary",    dotClass: "bg-primary",    ringClass: "border-primary/30" },
-    { id: 3, name: "The Void Rift",         desc: "A tear in the sky where the enemy gathers. Approach with extreme caution.", x: "78%", y: "22%", icon: Zap,     colorClass: "text-rose-400",   dotClass: "bg-rose-400",   ringClass: "border-rose-400/30" },
-    { id: 4, name: "Natsuki's Observatory", desc: "High-altitude watch post of the Founder. The entire world is visible from here.", x: "36%", y: "28%", icon: Eye,     colorClass: "text-rose-300",    dotClass: "bg-rose-300",    ringClass: "border-rose-300/30" },
-    { id: 5, name: "Drifting Isles",        desc: "A network of contested territories. Home to rare card spawns and hidden treasures.", x: "68%", y: "75%", icon: Compass, colorClass: "text-teal-400",   dotClass: "bg-teal-400",   ringClass: "border-teal-400/30" },
-  ];
+  const [data, setData] = useState<{ continents: ContinentInfo[]; regions: RegionInfo[]; territories: Territory[] } | null>(null);
+  const [error, setError] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const result = await fetchTerritories();
+        if (mounted) setData(result);
+      } catch {
+        if (mounted) setError(true);
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    })();
+    // Refresh periodically so a territory claimed in WhatsApp shows up here
+    // without needing a manual page reload.
+    const interval = setInterval(async () => {
+      try {
+        const result = await fetchTerritories();
+        if (mounted) setData(result);
+      } catch { /* keep showing the last good data on a transient failure */ }
+    }, 30000);
+    return () => { mounted = false; clearInterval(interval); };
+  }, []);
+
+  const regionById = useMemo(() => new Map((data?.regions || []).map((r) => [r.id, r])), [data]);
+  const continentById = useMemo(() => new Map((data?.continents || []).map((c) => [c.id, c])), [data]);
+
+  // Active guilds present on the map right now, for the legend.
+  const activeGuilds = useMemo(() => {
+    const seen = new Map<string, TerritoryOwner>();
+    for (const t of data?.territories || []) {
+      if (t.owner && !seen.has(t.owner.id)) seen.set(t.owner.id, t.owner);
+    }
+    return [...seen.values()];
+  }, [data]);
 
   return (
     <div className="min-h-screen relative overflow-hidden flex flex-col" style={{ background: "linear-gradient(180deg,#0A0A0F 0%,#111117 35%,#15151D 60%,#0A0A0F 100%)" }}>
@@ -43,16 +131,6 @@ export default function World() {
           })}
         </svg>
 
-        {/* Constellation lines connecting regions (decorative) */}
-        <svg className="absolute inset-0 w-full h-full opacity-20" viewBox="0 0 100 100" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
-          <line x1="50" y1="38" x2="22" y2="65" stroke="#A0001A" strokeWidth="0.15" strokeDasharray="1 2" />
-          <line x1="50" y1="38" x2="78" y2="22" stroke="#A0001A" strokeWidth="0.15" strokeDasharray="1 2" />
-          <line x1="50" y1="38" x2="36" y2="28" stroke="#A0001A" strokeWidth="0.15" strokeDasharray="1 2" />
-          <line x1="50" y1="38" x2="68" y2="75" stroke="#A0001A" strokeWidth="0.15" strokeDasharray="1 2" />
-          <line x1="22" y1="65" x2="68" y2="75" stroke="#A0001A" strokeWidth="0.10" strokeDasharray="1 3" />
-          <line x1="36" y1="28" x2="78" y2="22" stroke="#A0001A" strokeWidth="0.10" strokeDasharray="1 3" />
-        </svg>
-
         {/* Atlas grid */}
         <svg className="absolute inset-0 w-full h-full opacity-[0.06]" viewBox="0 0 100 100" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
           {Array.from({ length: 9 }, (_, i) => (
@@ -86,64 +164,99 @@ export default function World() {
         <p className="font-mono tracking-[0.5em] text-xs uppercase mb-1" style={{ color:"rgba(160,0,26,0.4)" }}>反逆</p>
         <h1 className="font-serif text-3xl md:text-5xl font-bold text-white tracking-widest uppercase neon-text-sky">Requiem Order World Atlas</h1>
         <p className="mt-2 max-w-xl text-sm" style={{ color:"rgba(212,201,168,0.35)" }}>
-          Interactive celestial atlas of the known Requiem Order territories. Hover a region to reveal its secrets.
+          Live territory control across the known world. Every marker reflects real guild ownership — claim territory in-bot with <span className="font-mono">.territory claim</span> and it appears here.
         </p>
       </div>
 
-      {/* ── Region Markers ── */}
-      <div className="flex-1 relative w-full min-h-[700px] z-10">
-        {REGIONS.map((region) => (
-          <div
-            key={region.id}
-            className="absolute -translate-x-1/2 -translate-y-1/2 group/marker cursor-crosshair"
-            style={{ left: region.x, top: region.y }}
-          >
-            <div className="relative">
-              {/* Outer pulse */}
-              <div className={`absolute inset-0 rounded-full animate-ping opacity-25 ${region.dotClass}`} style={{ animationDuration:`${2.2 + region.id*0.35}s` }} />
-              <div className={`absolute inset-0 rounded-full animate-ping opacity-10 scale-[2] ${region.dotClass}`} style={{ animationDuration:`${3.4 + region.id*0.35}s` }} />
+      {/* ── Loading / error states ── */}
+      {loading && (
+        <div className="flex-1 flex items-center justify-center z-10 gap-2 text-white/40 text-sm">
+          <Loader2 className="w-4 h-4 animate-spin" /> Loading world state...
+        </div>
+      )}
+      {!loading && error && (
+        <div className="flex-1 flex items-center justify-center z-10 text-rose-400/70 text-sm">
+          Failed to load territory data. Please try again shortly.
+        </div>
+      )}
 
-              {/* Marker */}
-              <div className={`w-12 h-12 rounded-full flex items-center justify-center relative z-10 border transition-all duration-300 hover:scale-110 glass-card ${region.colorClass} ${region.ringClass}`}
-                style={{ background:"rgba(0,0,0,0.55)" }}>
-                <region.icon className="w-5 h-5" />
-              </div>
+      {/* ── Territory Markers ── */}
+      {!loading && !error && data && (
+        <div className="flex-1 relative w-full min-h-[700px] z-10">
+          {data.territories.map((territory) => {
+            const style = territory.owner ? colorForGuild(territory.owner.id) : UNCLAIMED_STYLE;
+            const region = regionById.get(territory.region);
+            const continent = region ? continentById.get(region.continent) : undefined;
+            return (
+              <div
+                key={territory.id}
+                className="absolute -translate-x-1/2 -translate-y-1/2 group/marker cursor-crosshair"
+                style={{ left: `${territory.x}%`, top: `${territory.y}%` }}
+              >
+                <div className="relative">
+                  {/* Outer pulse — only animates for claimed territories, so unclaimed ones read as quieter/neutral */}
+                  {territory.owner && (
+                    <>
+                      <div className={`absolute inset-0 rounded-full animate-ping opacity-25 ${style.dot}`} style={{ animationDuration: "2.6s" }} />
+                      <div className={`absolute inset-0 rounded-full animate-ping opacity-10 scale-[2] ${style.dot}`} style={{ animationDuration: "3.8s" }} />
+                    </>
+                  )}
 
-              {/* Tooltip */}
-              <div className="absolute top-full left-1/2 -translate-x-1/2 mt-4 w-68 p-4 rounded-xl opacity-0 translate-y-2 pointer-events-none group-hover/marker:opacity-100 group-hover/marker:translate-y-0 transition-all duration-300 z-50"
-                style={{ width:260, background:"rgba(17,17,23,0.92)", border:"1px solid rgba(160,0,26,0.18)", boxShadow:"0 0 30px rgba(160,0,26,0.2)" }}>
-                <div className={`text-[10px] font-mono tracking-widest uppercase mb-1 opacity-60 ${region.colorClass}`}>Region {String(region.id).padStart(2,"0")}</div>
-                <h3 className="font-serif text-base font-bold text-white mb-1.5">{region.name}</h3>
-                <p className="text-xs leading-relaxed" style={{ color:"rgba(212,201,168,0.45)" }}>{region.desc}</p>
-                <div className="mt-3 pt-2 text-[10px] font-bold tracking-[0.2em] uppercase text-center" style={{ borderTop:"1px solid rgba(255,255,255,0.05)", color:"rgba(160,0,26,0.6)" }}>
-                  Requiem Order Territory
+                  {/* Marker */}
+                  <div className={`w-10 h-10 rounded-full flex items-center justify-center relative z-10 border transition-all duration-300 hover:scale-110 glass-card ${style.text} ${style.ring}`}
+                    style={{ background:"rgba(0,0,0,0.55)" }}>
+                    {territory.owner ? <Crown className="w-4 h-4" /> : <MapPin className="w-4 h-4" />}
+                  </div>
+
+                  {/* Tooltip */}
+                  <div className="absolute top-full left-1/2 -translate-x-1/2 mt-4 p-4 rounded-xl opacity-0 translate-y-2 pointer-events-none group-hover/marker:opacity-100 group-hover/marker:translate-y-0 transition-all duration-300 z-50"
+                    style={{ width:260, background:"rgba(17,17,23,0.92)", border:"1px solid rgba(160,0,26,0.18)", boxShadow:"0 0 30px rgba(160,0,26,0.2)" }}>
+                    <div className={`text-[10px] font-mono tracking-widest uppercase mb-1 opacity-60 ${style.text}`}>
+                      {continent?.name || "?"} · {region?.name || "?"}
+                    </div>
+                    <h3 className="font-serif text-base font-bold text-white mb-1.5">{territory.name}</h3>
+                    <p className="text-xs leading-relaxed" style={{ color:"rgba(212,201,168,0.45)" }}>
+                      Produces <span className="text-white/70">{territory.resource}</span> — {territory.baseIncome.toLocaleString()} gold/day base income.
+                    </p>
+                    <div className="mt-3 pt-2 text-[10px] font-bold tracking-[0.2em] uppercase text-center" style={{ borderTop:"1px solid rgba(255,255,255,0.05)", color: territory.owner ? "rgba(212,201,168,0.7)" : "rgba(160,0,26,0.6)" }}>
+                      {territory.owner
+                        ? `Controlled by ${territory.owner.name}${territory.taxRate != null ? ` · ${territory.taxRate}% tax` : ""}`
+                        : "Unclaimed Territory"}
+                    </div>
+                  </div>
                 </div>
               </div>
-            </div>
-          </div>
-        ))}
-      </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* ── Legend ── */}
-      <div className="absolute z-20 p-4 rounded-xl" style={{ bottom:80, right:24, background:"rgba(17,17,23,0.85)", border:"1px solid rgba(160,0,26,0.15)", boxShadow:"0 0 20px rgba(160,0,26,0.08)" }}>
-        <h4 className="text-[10px] font-mono font-bold tracking-[0.3em] uppercase pb-2 mb-3" style={{ color:"rgba(160,0,26,0.5)", borderBottom:"1px solid rgba(255,255,255,0.06)" }}>
-          Map Legend
-        </h4>
-        <ul className="space-y-2 text-xs text-white/70">
-          {[
-            { dot:"bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.8)]",  label:"Capital" },
-            { dot:"bg-primary shadow-[0_0_6px_rgba(160,0,26,0.8)]",   label:"Friendly / HQ" },
-            { dot:"bg-rose-400 shadow-[0_0_6px_rgba(251,113,133,0.8)]", label:"Hostile / Rift" },
-            { dot:"bg-rose-300",   label:"Observation Post" },
-            { dot:"bg-teal-400",  label:"Neutral / Loot Zone" },
-          ].map(l => (
-            <li key={l.label} className="flex items-center gap-2">
-              <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${l.dot}`} />
-              {l.label}
+      {!loading && !error && (
+        <div className="absolute z-20 p-4 rounded-xl" style={{ bottom:80, right:24, background:"rgba(17,17,23,0.85)", border:"1px solid rgba(160,0,26,0.15)", boxShadow:"0 0 20px rgba(160,0,26,0.08)" }}>
+          <h4 className="text-[10px] font-mono font-bold tracking-[0.3em] uppercase pb-2 mb-3" style={{ color:"rgba(160,0,26,0.5)", borderBottom:"1px solid rgba(255,255,255,0.06)" }}>
+            Guild Control
+          </h4>
+          <ul className="space-y-2 text-xs text-white/70 max-h-48 overflow-y-auto pr-1">
+            {activeGuilds.length === 0 && (
+              <li className="text-white/40 italic">No territories claimed yet</li>
+            )}
+            {activeGuilds.map((g) => {
+              const style = colorForGuild(g.id);
+              return (
+                <li key={g.id} className="flex items-center gap-2">
+                  <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${style.dot}`} style={{ boxShadow: `0 0 6px ${style.glow}` }} />
+                  {g.name}
+                </li>
+              );
+            })}
+            <li className="flex items-center gap-2 pt-1" style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}>
+              <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${UNCLAIMED_STYLE.dot}`} />
+              Unclaimed
             </li>
-          ))}
-        </ul>
-      </div>
+          </ul>
+        </div>
+      )}
 
       {/* ── Coord label (flavour) ── */}
       <div className="absolute bottom-5 left-1/2 -translate-x-1/2 z-20 font-mono text-[10px] tracking-widest" style={{ color:"rgba(160,0,26,0.25)" }}>

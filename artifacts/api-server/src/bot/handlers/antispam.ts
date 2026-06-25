@@ -15,9 +15,8 @@ export async function checkAntispam(
   isAdmin: boolean
 ): Promise<boolean> {
   if (isAdmin) return false;
-  const group = getGroup(groupId);
+  const group = await getGroup(groupId);
   if (!group || group.antispam !== "on") return false;
-
   const key = `${groupId}:${senderId}`;
   const now = Date.now();
   const entry = messageCache.get(key) || { count: 0, lastTime: now };
@@ -53,7 +52,7 @@ export async function checkAntilink(
   msgKey: any,
   isAdmin: boolean
 ): Promise<boolean> {
-  const group = getGroup(groupId);
+  const group = await getGroup(groupId);
   // Only enforce when EXPLICITLY set to "on" — null / "" / "off" all mean disabled
   if (!group || group.antilink !== "on") return false;
   if (isAdmin) return false;
@@ -113,7 +112,7 @@ export async function checkBlacklist(
   isAdmin: boolean
 ): Promise<boolean> {
   if (isAdmin) return false;
-  const group = getGroup(groupId);
+  const group = await getGroup(groupId);
   if (!group) return false;
 
   let blacklist: string[] = [];
@@ -162,7 +161,7 @@ export async function checkBlacklistedJoin(
   groupId: string,
   participant: string
 ): Promise<boolean> {
-  const group = getGroup(groupId);
+  const group = await getGroup(groupId);
   if (!group) return false;
 
   let blacklist: string[] = [];

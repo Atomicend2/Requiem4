@@ -15,7 +15,7 @@ import { handleRpg } from "../commands/rpg.js";
 import { handleGuilds } from "../commands/guilds.js";
 import { handleStaff } from "../commands/staff.js";
 import { handleAI } from "../commands/ai.js";
-import { handleMenu, handleInfo, handleHelp, handleSetMenuImage } from "../commands/menu.js";
+import { handleMenu, handleStaffMenu, handleInfo, handleHelp, handleSetMenuImage } from "../commands/menu.js";
 import { handleSummer } from "../commands/summer.js";
 import { handleLottery } from "../commands/lottery.js";
 import { handleConverter } from "../commands/converter.js";
@@ -82,7 +82,7 @@ export async function handleMessage(
   // key a brand-new ghost row off of.
   let earlyLidFallbackPhone = "";
   if (sender.endsWith("@lid")) {
-    const lidRecord = getUserByLid(senderRaw);
+    const lidRecord = await getUserByLid(senderRaw);
     if (lidRecord?.id) {
       earlyLidFallbackPhone = lidRecord.id;
       sender = `${lidRecord.id}@s.whatsapp.net`;
@@ -93,56 +93,48 @@ export async function handleMessage(
     const lidNum = senderRaw.split("@")[0];
     const realPhone = sender.split("@")[0].split(":")[0];
     try {
-      const { getDb } = await import("../db/database.js");
-      const db = getDb();
-      const lidRecord = db.prepare("SELECT * FROM users WHERE id = ?").get(lidNum) as any;
+      const { col: colMig } = await import("../db/mongo.js");
+      const lidRecord = await colMig("users").findOne({ _id: lidNum });
+      const MIGRATE_TABLES = ["rpg_characters","inventory","user_cards","message_counts","card_deck","deck_backgrounds","guild_members","warnings","muted_users","summer_tokens","afk_users","lottery_entries"] as const;
       if (lidRecord) {
-        const phoneRecord = db.prepare("SELECT * FROM users WHERE id = ?").get(realPhone) as any;
+        const phoneRecord = await colMig("users").findOne({ _id: realPhone });
         if (!phoneRecord) {
-          // Rename the LID-keyed record to the real phone number (atomic migration)
-          db.transaction(() => {
-            db.prepare("UPDATE users SET id = ?, phone = ?, lid = ? WHERE id = ?").run(realPhone, realPhone, lidNum, lidNum);
-            for (const t of ["rpg_characters", "inventory", "user_cards", "message_counts", "card_deck", "deck_backgrounds", "guild_members", "warnings", "muted_users", "summer_tokens", "afk_users"]) {
-              try { db.prepare(`UPDATE OR IGNORE ${t} SET user_id = ? WHERE user_id = ?`).run(realPhone, lidNum); } catch {}
-            }
-          })();
+          // Migrate LID-keyed record to phone-keyed (insert new, migrate children, delete old)
+          const { _id: _oldId, ...restLid } = lidRecord;
+          await colMig("users").insertOne({ ...restLid, _id: realPhone, phone: realPhone, lid: lidNum });
+          for (const t of MIGRATE_TABLES) {
+            try { await colMig(t).updateMany({ user_id: lidNum }, { $set: { user_id: realPhone } }); } catch {}
+          }
+          await colMig("users").deleteOne({ _id: lidNum });
         } else {
-          // Both records exist — keep phone-keyed as canonical.
-          // Combine numeric assets (sum balance, keep higher xp/level), migrate all
-          // child table rows, then delete the lid-keyed duplicate.
-          db.transaction(() => {
-            db.prepare(`UPDATE users SET
-              lid    = COALESCE(lid, ?),
-              balance = balance + ?,
-              xp      = MAX(xp, ?),
-              level   = MAX(level, ?)
-            WHERE id = ?`).run(
-              lidNum,
-              lidRecord.balance || 0,
-              lidRecord.xp     || 0,
-              lidRecord.level  || 0,
-              realPhone,
-            );
-            for (const t of ["rpg_characters","inventory","user_cards","message_counts","card_deck","deck_backgrounds","guild_members","warnings","muted_users","summer_tokens","afk_users","lottery_entries"]) {
-              try { db.prepare(`UPDATE OR IGNORE ${t} SET user_id = ? WHERE user_id = ?`).run(realPhone, lidNum); } catch {}
-            }
-            db.prepare("DELETE FROM users WHERE id = ?").run(lidNum);
-          })();
+          // Both records exist — merge into phone-keyed, delete lid-keyed duplicate
+          await colMig("users").updateOne({ _id: realPhone }, [
+            { $set: {
+              lid: { $ifNull: ["$lid", lidNum] },
+              balance: { $add: ["$balance", lidRecord.balance || 0] },
+              xp: { $max: ["$xp", lidRecord.xp || 0] },
+              level: { $max: ["$level", lidRecord.level || 0] },
+            }}
+          ] as any);
+          for (const t of MIGRATE_TABLES) {
+            try { await colMig(t).updateMany({ user_id: lidNum }, { $set: { user_id: realPhone } }); } catch {}
+          }
+          await colMig("users").deleteOne({ _id: lidNum });
         }
       } else if (!earlyLidFallbackPhone) {
-        // No LID-keyed row yet — just store the lid on the phone-keyed row for future reference
-        linkUserLid(realPhone, senderRaw);
+        // No LID-keyed row yet — just store the lid on the phone-keyed row
+        await linkUserLid(realPhone, senderRaw);
       }
     } catch {}
   }
   // ────────────────────────────────────────────────────────────────────────────
 
   const senderNormalized = sender.split("@")[0].split(":")[0];
-  const senderUserRecord = getUser(senderNormalized);
+  const senderUserRecord = await getUser(senderNormalized);
   if (senderUserRecord?.is_bot === 1) return;
 
-  if (isUserBanned(sender)) return;
-  if (isGroup && isBanned("group", from)) {
+  if (await isUserBanned(sender)) return;
+  if (isGroup && await isBanned("group", from)) {
     await sock.groupLeave(from).catch(() => {});
     return;
   }
@@ -163,12 +155,12 @@ export async function handleMessage(
   const mentionedJids: string[] =
     getContextInfo(messageContent)?.mentionedJid || [];
 
-  ensureUser(sender, msg.pushName || undefined);
-  addUserXp(sender, 5);
+  await ensureUser(sender, msg.pushName || undefined);
+  void addUserXp(sender, 5);
 
   if (isGroup) {
-    incrementMessageCount(sender, from);
-    incrementGroupActivity(from);
+    void incrementMessageCount(sender, from);
+    void incrementGroupActivity(from);
   }
 
   let groupMeta: any = resolvedGroupMeta;
@@ -178,7 +170,7 @@ export async function handleMessage(
 
   if (isGroup) {
     try {
-      ensureGroup(from);
+      await ensureGroup(from);
       if (!groupMeta) groupMeta = await sock.groupMetadata(from);
       const botIds = getBotIdentityCandidates(sock);
 
@@ -205,7 +197,7 @@ export async function handleMessage(
   );
 
   const senderPhone = sender.split("@")[0].split(":")[0];
-  const senderStaff = getStaff(senderPhone);
+  const senderStaff = await getStaff(senderPhone);
   // isOwner: check phone list, check staff table (owner role), and also check
   // the original senderRaw (pre-LID-resolution) so even if resolution failed
   // the owner can still be recognised by their phone number in the owner list.
@@ -217,7 +209,7 @@ export async function handleMessage(
   // for brand-new users whose @lid has no DB record yet (first-ever message).
   let lidFallbackPhone = earlyLidFallbackPhone;
   if (!lidFallbackPhone && sender.endsWith("@lid")) {
-    const lidRecord = getUserByLid(senderRaw);
+    const lidRecord = await getUserByLid(senderRaw);
     if (lidRecord) lidFallbackPhone = lidRecord.id;
   }
   // Direct LID match against BOT_OWNER_LID — works on the very first message,
@@ -225,12 +217,13 @@ export async function handleMessage(
   // before any row exists for them (DMs have no group metadata to resolve
   // @lid → phone, so this is the only reliable path for a brand-new owner).
   const isDirectLidOwner = senderRaw.endsWith("@lid") && isOwnerLid(senderRaw);
+  const lidFallbackStaff = lidFallbackPhone ? await getStaff(lidFallbackPhone) : null;
   const isOwner = isOwnerPhone(senderPhone)
     || isOwnerPhone(rawSenderPhone)
     || isDirectLidOwner
     || (lidFallbackPhone ? isOwnerPhone(lidFallbackPhone) : false)
     || senderStaff?.role === "owner"
-    || (lidFallbackPhone ? getStaff(lidFallbackPhone)?.role === "owner" : false);
+    || lidFallbackStaff?.role === "owner";
 
   // If we recognised the owner purely by their raw LID (no DB row linking it
   // yet), make sure their canonical phone-keyed row exists and has the LID
@@ -239,8 +232,8 @@ export async function handleMessage(
   if (isDirectLidOwner) {
     try {
       const { ensureUser: ensureOwnerUser, linkUserLid: linkOwnerLid } = await import("../db/queries.js");
-      ensureOwnerUser(BOT_OWNER_PHONE, msg.pushName || undefined);
-      linkOwnerLid(BOT_OWNER_PHONE, senderRaw);
+      await ensureOwnerUser(BOT_OWNER_PHONE, msg.pushName || undefined);
+      await linkOwnerLid(BOT_OWNER_PHONE, senderRaw);
     } catch (err) {
       logger.debug({ err }, "Could not auto-link owner LID");
     }
@@ -252,7 +245,7 @@ export async function handleMessage(
   // once per process startup, not once per message.
   if (isOwner) {
     const ownerKey = lidFallbackPhone || senderPhone || rawSenderPhone || BOT_OWNER_PHONE;
-    const ownerRow = getUser(ownerKey);
+    const ownerRow = await getUser(ownerKey);
     if (!ownerRow?.owner_greeted) {
       const staffCommandList =
 `👑 *Welcome back, Master.*
@@ -262,53 +255,60 @@ _${getBotName()} is at your command._
 
 Here is your full staff command reference — these are not shown in *.menu* since they're privileged-only.
 
-*🛡️ STAFF MANAGEMENT*
-• *.addmod <phone>* — Appoint a mod (mod+ can run this)
-• *.addguardian <phone>* — Appoint a guardian (mod+ can run this)
-• *.addrole <phone> <mod|guardian>* — Same as above, explicit role
-• *.removemod <phone>* / *.removeguardian <phone>* — Remove a staff member (cannot remove an owner)
-• *.recruit <phone>* — Add someone as a recruit (lowest staff tier)
-• *.modlist* / *.mods* — List all current staff and their roles
+*🛡️ STAFF MANAGEMENT* _(mod/guardian/owner)_
+• *.addmod <phone>* — Appoint a mod
+• *.addguardian <phone>* — Appoint a guardian
+• *.addrole <phone> <mod|guardian>* — Set role explicitly
+• *.removemod <phone>* / *.removeguardian <phone>* — Remove a staff member
+• *.recruit <phone>* — Add a recruit (lowest staff tier)
+• *.modlist* / *.mods* — List all current staff and roles
 
-*🤖 BOT MANAGEMENT*
-• *.bots* — Live status of every connected bot instance
+*🤖 BOT MANAGEMENT* _(mod/guardian/owner)_
+• *.bots* — Live status of every connected bot
 • *.show* — Current bot's name, ID, and online count
-• *.join <invite_link>* — Make the bot join a group via invite link
-• *.exit* — Make the bot leave the current group
-• *.post <message>* — Broadcast an announcement to every group the bot is in
-• *.setmenuimg* — Set the image attached to every *.menu* (reply to an image)
+• *.join <invite_link>* — Make bot join a group
+• *.exit* — Make bot leave current group
+• *.post <message>* — Broadcast to every group the bot is in
+• *.setmenuimg* — Set the image attached to *.menu* (reply to an image)
 
-*💰 ECONOMY & ACCESS CONTROL*
+*💰 ECONOMY & ACCESS CONTROL* _(mod/guardian/owner)_
 • *.addpremium <phone> [days=30]* — Grant Premium status
 • *.removepremium <phone>* — Revoke Premium status
-• *.resetbal <phone>* — Reset a user's balance only
-• *.reset <phone>* — Fully wipe a user's profile (*owner only*)
+• *.resetbal <phone>* — Reset a user's balance
 • *.addinv <phone> <item>* — Give a user an inventory item
+• *.reset <phone>* — Fully wipe a user's profile (*owner only*)
 
-*🔨 MODERATION*
-• *.ban <phone> [reason]* — Ban a user bot-wide
+*🔨 MODERATION* _(mod/guardian/owner)_
+• *.ban <phone> [reason]* — Bot-wide ban a user
 • *.unban <phone>* — Lift a ban
-• *.banlist* — View everyone currently banned
+• *.banlist* — View all banned users
 
-*🎴 CARD DATABASE*
+*🎴 CARD DATABASE* _(mod/guardian/owner)_
 • *.fetchcards [tier] [limit]* — Import cards from Shoob.gg
-• *.pullcards* — Full bulk card import
+• *.pullcards* — Full bulk card import (Shoob)
 • *.synccards* — Incremental card sync
 • *.cardlogs* — View recent card sync activity
-• *.upload <tier> <name>, <series>* — Manually upload a card (reply to an image)
+• *.upload <tier> <name>, <series>* — Upload a card manually (reply to an image)
+• *.dc* / *.ac* / *.rc* — Disable / enable / restrict card spawning in current group
 
-*⚙️ GROUP UTILITIES (run inside a group)*
-• *.dc* / *.ac* / *.rc* — Disable / enable / restrict card spawning in this group
-• *.setms <message>* / *.delms* — Set or delete the milestone message
+*📋 GROUP UTILITIES* _(mod/guardian/owner)_
+• *.setms <message>* / *.delms* — Set or remove the milestone message
+• *.setrules <text>* — Set the group rules
+• *.rules* — View the current group rules
 
-> _This message only sends once. Type *.menu* anytime for the regular command list._`;
+*👑 OWNER-ONLY COMMANDS*
+• *.reset <phone>* — Fully wipe a user's profile
+• *.summon* — Force-connect / reconnect all bots
+• *.restart* — Restart bot processes
+
+> _This message only sends once per session. Type *.menu* anytime for the regular command list._`;
 
       // Always DM the owner — even if they triggered this from inside a group
       const ownerDmJid = `${ownerKey.replace(/\D/g, "")}@s.whatsapp.net`;
       await sendText(ownerDmJid, staffCommandList).catch(() => {});
       try {
-        ensureUser(ownerKey, msg.pushName || undefined);
-        updateUser(ownerKey, { owner_greeted: 1 });
+        await ensureUser(ownerKey, msg.pushName || undefined);
+        void updateUser(ownerKey, { owner_greeted: 1 });
       } catch (err) {
         logger.debug({ err }, "Could not persist owner_greeted flag");
       }
@@ -321,12 +321,12 @@ Here is your full staff command reference — these are not shown in *.menu* sin
   // no command processing. Groups remain open to everyone, unaffected by
   // this check.
   if (!isGroup) {
-    const dmStaff = getStaff(sender) || (lidFallbackPhone ? getStaff(lidFallbackPhone) : null);
+    const dmStaff = await getStaff(sender) || (lidFallbackPhone ? await getStaff(lidFallbackPhone) : null);
     const isGuardianOrAbove = isOwner || dmStaff?.role === "guardian";
     if (!isGuardianOrAbove) return;
   }
 
-  if (isGroup && getActiveMute(sender, from)) {
+  if (isGroup && await getActiveMute(sender, from)) {
     await sock.sendMessage(from, { delete: normalizedMsg.key as any }).catch(() => {});
     return;
   }
@@ -373,7 +373,7 @@ Here is your full staff command reference — these are not shown in *.menu* sin
     if (antiLink) return;
 
     // .antism — delete messages that are replies to WhatsApp Statuses
-    const msgGroup = getGroup(from);
+    const msgGroup = await getGroup(from);
     if (msgGroup?.antispam === "on" && !isAdmin) {
       const ctxInfo = getContextInfo(messageContent);
       const isStatusReply = ctxInfo?.remoteJid === "status@broadcast" ||
@@ -425,7 +425,7 @@ Here is your full staff command reference — these are not shown in *.menu* sin
         quotedPhone === botPhone ||
         (botLidNum && quotedPhone === botLidNum)
       ));
-      const groupRecord = isGroup ? getGroup(from) : null;
+      const groupRecord = isGroup ? await getGroup(from) : null;
       const echidnaChatEnabled = groupRecord?.echidna_chat === "on";
       const persona = getPersona(getPersonaForSock(sock));
 
@@ -525,25 +525,23 @@ function getContextInfo(message: any): any {
 
 async function sendMentionStickerIfNeeded(sock: WASocket, from: string, mentionedJids: string[], quoted: proto.IWebMessageInfo): Promise<void> {
   for (const jid of mentionedJids) {
-    if (!canUseMentionSticker(jid)) continue;
+    if (!await canUseMentionSticker(jid)) continue;
     const sticker = getBotSetting(`mention_sticker:${jid}`);
     if (!sticker) continue;
     await sock.sendMessage(from, { sticker }, { quoted: quoted as any });
   }
 }
 
-function canUseMentionSticker(jid: string): boolean {
-  // Check if this JID belongs to the bot owner
+async function canUseMentionSticker(jid: string): Promise<boolean> {
   const phone = jid.split("@")[0].split(":")[0].replace(/\D/g, "");
   if (isOwnerPhone(phone)) return true;
-  // For @lid JIDs, resolve via DB before giving up
   if (jid.endsWith("@lid")) {
-    const lidUser = getUserByLid(jid);
+    const lidUser = await getUserByLid(jid);
     if (lidUser && isOwnerPhone(lidUser.id)) return true;
   }
-  const staff = getStaff(jid);
+  const staff = await getStaff(jid);
   if (staff?.role === "mod" || staff?.role === "guardian") return true;
-  const user = getUser(jid);
+  const user = await getUser(jid);
   if (!user?.premium) return false;
   const expiry = Number(user.premium_expiry || 0);
   return expiry === 0 || expiry > Math.floor(Date.now() / 1000);
@@ -559,12 +557,12 @@ const UNREG_ALLOWED_CMDS = new Set([
 async function dispatch(ctx: CommandContext): Promise<void> {
   const { command, from, sender, msg } = ctx;
 
-  const isPrivilegedStaff = !!getStaff(sender) || (!!ctx.lidFallbackPhone && !!getStaff(ctx.lidFallbackPhone));
-  if (isPrivilegedStaff && !getUser(sender) && !(ctx.lidFallbackPhone && getUser(ctx.lidFallbackPhone))) {
+  const isPrivilegedStaff = !!(await getStaff(sender)) || (!!(ctx.lidFallbackPhone) && !!(await getStaff(ctx.lidFallbackPhone)));
+  if (isPrivilegedStaff && !(await getUser(sender)) && !(ctx.lidFallbackPhone && await getUser(ctx.lidFallbackPhone))) {
     try {
       const { ensureUser: ensureStaffUser } = await import("../db/queries.js");
       const staffPhone = ctx.lidFallbackPhone || sender.split("@")[0].split(":")[0].replace(/\D/g, "");
-      ensureStaffUser(staffPhone, msg.pushName || undefined);
+      await ensureStaffUser(staffPhone, msg.pushName || undefined);
     } catch (err) {
       logger.debug({ err }, "Could not auto-ensure staff user row");
     }
@@ -573,7 +571,7 @@ async function dispatch(ctx: CommandContext): Promise<void> {
     // getUser() extracts the phone from the JID. If group metadata resolution
     // failed and sender is still an @lid JID, the extracted digits are the LID,
     // not the phone — so look up by LID as a fallback before giving up.
-    const senderUser = getUser(sender) ?? (ctx.lidFallbackPhone ? getUser(ctx.lidFallbackPhone) : null);
+    const senderUser = await getUser(sender) ?? (ctx.lidFallbackPhone ? await getUser(ctx.lidFallbackPhone) : null);
     if (!senderUser?.registered) {
       await sendText(
         from,
@@ -594,8 +592,13 @@ async function dispatch(ctx: CommandContext): Promise<void> {
     case "menu":
       return handleMenu(ctx);
 
+    case "staffmenu":
+    case "adminmenu":
+    case "modmenu":
+      return handleStaffMenu(ctx);
+
     case "setmenuimg": {
-      if (!ctx.isOwner && getStaff(sender)?.role !== "guardian") {
+      if (!ctx.isOwner && (await getStaff(sender))?.role !== "guardian") {
         await sendText(from, "❌ Only the owner or a guardian can set the menu image.");
         return;
       }
@@ -604,12 +607,14 @@ async function dispatch(ctx: CommandContext): Promise<void> {
 
     case "ping":
     case "test":
-    case "alive":
-      // ⌛ reaction on the triggering message so the user gets instant feedback.
-      // Must use ctx.sock here — bare `sock` is not in scope inside dispatch().
-      await ctx.sock.sendMessage(from, { react: { text: "⌛", key: msg.key } }).catch(() => {});
-      await sendText(from, `🌌 *${getBotName()}* — 反逆 Online\n> ${getPingMs(msg)}ms`);
+    case "alive": {
+      const pingMs = getPingMs(msg);
+      await Promise.all([
+        ctx.sock.sendMessage(from, { react: { text: "✅", key: msg.key } }).catch(() => {}),
+        sendText(from, `🌌 *${getBotName()}* — 反逆 Online\n⚡ ${pingMs}ms`),
+      ]);
       return;
+    }
 
     case "uptime": {
       const u = process.uptime();
@@ -677,7 +682,7 @@ async function dispatch(ctx: CommandContext): Promise<void> {
       const senderPhone = ctx.senderRaw.endsWith("@lid")
         ? (ctx.lidFallbackPhone || sender.split("@")[0].split(":")[0])
         : sender.split("@")[0].split(":")[0];
-      const already = getUser(senderPhone);
+      const already = await getUser(senderPhone);
       // Short-circuit only when FULLY linked (both registered AND lid set)
       if (already?.registered && already?.lid) {
         await sendText(from, "✅ *Already linked!* Type *.p* to see your profile.");
@@ -688,16 +693,15 @@ async function dispatch(ctx: CommandContext): Promise<void> {
         await sendText(from, "❌ Usage: *.verify <code>*\n\nRun *.link <phone>* first to get a code.");
         return;
       }
-      const { getDb } = await import("../db/database.js");
-      const db = getDb();
+      const { col: colOtp } = await import("../db/mongo.js");
       const nowSec = Math.floor(Date.now() / 1000);
-      const otpRow = db.prepare("SELECT * FROM whatsapp_link_otps WHERE wa_sender = ?").get(senderPhone) as any;
+      const otpRow = await colOtp("whatsapp_link_otps").findOne({ wa_sender: senderPhone });
       if (!otpRow) {
         await sendText(from, "❌ No pending link request found.\n\nType *.link <phone>* to start the process.");
         return;
       }
       if (otpRow.expires_at < nowSec) {
-        db.prepare("DELETE FROM whatsapp_link_otps WHERE wa_sender = ?").run(senderPhone);
+        await colOtp("whatsapp_link_otps").deleteOne({ wa_sender: senderPhone });
         await sendText(from, "❌ Code expired. Type *.link <phone>* again to get a new code.");
         return;
       }
@@ -707,10 +711,9 @@ async function dispatch(ctx: CommandContext): Promise<void> {
       }
 
       // ✅ OTP verified — consume it
-      db.prepare("DELETE FROM whatsapp_link_otps WHERE wa_sender = ?").run(senderPhone);
-      const phone = otpRow.phone as string; // canonical phone number — the master key
+      await colOtp("whatsapp_link_otps").deleteOne({ wa_sender: senderPhone });
+      const phone = otpRow.phone as string;
 
-      // Derive LID from ctx.senderRaw (the raw JID before LID→phone resolution)
       const lidNum = ctx.senderRaw.endsWith("@lid") ? ctx.senderRaw.split("@")[0] : null;
 
       const CHILD_TABLES = [
@@ -719,78 +722,73 @@ async function dispatch(ctx: CommandContext): Promise<void> {
         "muted_users", "summer_tokens", "afk_users", "lottery_entries",
       ] as const;
 
-      // ── Single TRANSACTION: merge ghosts, link, dedup ─────────────────────
-      db.transaction(() => {
-        // ── 4c: kill any row that already owns THIS lid under a different phone
-        //       (prevents UNIQUE index collision when we write lid below)
-        if (lidNum) {
-          const lidConflict = db.prepare(
-            "SELECT id, balance, xp, level FROM users WHERE lid = ? AND id != ?"
-          ).get(lidNum, phone) as any;
-          if (lidConflict) {
-            db.prepare(
-              "UPDATE users SET balance = balance + ?, xp = MAX(xp,?), level = MAX(level,?) WHERE id = ?"
-            ).run(lidConflict.balance || 0, lidConflict.xp || 0, lidConflict.level || 0, phone);
-            for (const t of CHILD_TABLES) {
-              try { db.prepare(`UPDATE OR IGNORE ${t} SET user_id = ? WHERE user_id = ?`).run(phone, lidConflict.id); } catch {}
-            }
-            db.prepare("DELETE FROM users WHERE id = ?").run(lidConflict.id);
-          }
-        }
-
-        // ── Ensure the canonical phone-keyed row exists ───────────────────
-        const existing = db.prepare(
-          "SELECT * FROM users WHERE id = ? OR phone = ?"
-        ).get(phone, phone) as any;
-
-        if (!existing) {
-          // WhatsApp-first: no row at all — create it now.
-          // name is left NULL; the user sets their own name on the website.
-          db.prepare(
-            "INSERT OR IGNORE INTO users " +
-            "(id, phone, whatsapp_id, lid, registered, registered_at, balance, created_at) " +
-            "VALUES (?, ?, ?, ?, 1, ?, 45000, ?)"
-          ).run(phone, phone, senderPhone, lidNum, nowSec, nowSec);
-        } else if (existing.id !== phone) {
-          // Row exists but was keyed by a different id (old LID or JID) — rename atomically
-          db.prepare(
-            "UPDATE users SET id=?, phone=?, whatsapp_id=?, lid=COALESCE(lid,?), " +
-            "registered=1, registered_at=COALESCE(NULLIF(registered_at,0),?) WHERE id=?"
-          ).run(phone, phone, senderPhone, lidNum, nowSec, existing.id);
+      // 4c: kill any row that already owns THIS lid under a different phone
+      if (lidNum) {
+        const lidConflict = await colOtp("users").findOne({ lid: lidNum, _id: { $ne: phone } });
+        if (lidConflict) {
+          await colOtp("users").updateOne({ _id: phone }, [
+            { $set: {
+              balance: { $add: ["$balance", lidConflict.balance || 0] },
+              xp: { $max: ["$xp", lidConflict.xp || 0] },
+              level: { $max: ["$level", lidConflict.level || 0] },
+            }}
+          ] as any);
           for (const t of CHILD_TABLES) {
-            try { db.prepare(`UPDATE OR IGNORE ${t} SET user_id = ? WHERE user_id = ?`).run(phone, existing.id); } catch {}
+            try { await colOtp(t).updateMany({ user_id: lidConflict._id }, { $set: { user_id: phone } }); } catch {}
           }
-        } else {
-          // Already correctly keyed by phone — just update linking fields
-          db.prepare(
-            "UPDATE users SET whatsapp_id=?, lid=COALESCE(lid,?), registered=1, " +
-            "registered_at=COALESCE(NULLIF(registered_at,0),?), phone=? WHERE id=?"
-          ).run(senderPhone, lidNum, nowSec, phone, phone);
+          await colOtp("users").deleteOne({ _id: lidConflict._id as string });
         }
+      }
 
-        // ── 4a: write the confirmed lid onto the canonical row ─────────────
-        if (lidNum) {
-          db.prepare("UPDATE users SET lid=? WHERE id=?").run(lidNum, phone);
+      // Ensure the canonical phone-keyed row exists
+      const existing = await colOtp("users").findOne({ $or: [{ _id: phone }, { phone }] });
+      if (!existing) {
+        await colOtp("users").insertOne({
+          _id: phone, phone, whatsapp_id: senderPhone, lid: lidNum,
+          registered: 1, registered_at: nowSec, balance: 45000, created_at: nowSec,
+        });
+      } else if (existing._id !== phone) {
+        const { _id: oldId, ...restExisting } = existing;
+        await colOtp("users").insertOne({
+          ...restExisting, _id: phone, phone,
+          whatsapp_id: senderPhone,
+          lid: existing.lid ?? lidNum,
+          registered: 1,
+          registered_at: existing.registered_at || nowSec,
+        });
+        for (const t of CHILD_TABLES) {
+          try { await colOtp(t).updateMany({ user_id: oldId }, { $set: { user_id: phone } }); } catch {}
         }
+        await colOtp("users").deleteOne({ _id: oldId as string });
+      } else {
+        await colOtp("users").updateOne({ _id: phone }, { $set: {
+          whatsapp_id: senderPhone,
+          lid: existing.lid ?? lidNum,
+          registered: 1,
+          registered_at: existing.registered_at || nowSec,
+          phone,
+        }});
+      }
 
-        // ── 4b: delete any other ghost rows sharing the same phone ─────────
-        db.prepare("DELETE FROM users WHERE phone=? AND id!=?").run(phone, phone);
+      // Write lid onto canonical row
+      if (lidNum) {
+        await colOtp("users").updateOne({ _id: phone }, { $set: { lid: lidNum } });
+      }
 
-        // ── migrate / clean up a ghost row that was keyed by senderPhone ───
-        if (senderPhone !== phone) {
-          for (const t of CHILD_TABLES) {
-            try { db.prepare(`UPDATE OR IGNORE ${t} SET user_id = ? WHERE user_id = ?`).run(phone, senderPhone); } catch {}
-          }
-          db.prepare("DELETE FROM users WHERE id=?").run(senderPhone);
+      // Delete any ghost rows sharing same phone
+      await colOtp("users").deleteMany({ phone, _id: { $ne: phone } });
+
+      // Migrate senderPhone ghost row
+      if (senderPhone !== phone) {
+        for (const t of CHILD_TABLES) {
+          try { await colOtp(t).updateMany({ user_id: senderPhone }, { $set: { user_id: phone } }); } catch {}
         }
-      })();
-      // ─────────────────────────────────────────────────────────────────────
+        await colOtp("users").deleteOne({ _id: senderPhone });
+      }
 
-      const userRow = db.prepare("SELECT * FROM users WHERE id=?").get(phone) as any;
-      const displayName = userRow?.name && userRow.name !== phone
-        ? userRow.name
-        : `+${phone}`; // show their number if no name set yet
-      const balance = userRow?.balance || 45000;
+      const userRow = await colOtp("users").findOne({ _id: phone });
+      const displayName = userRow?.name && userRow.name !== phone ? userRow.name : `+${phone}`;
+      const balance = userRow?.balance ?? 45000;
       await sendText(
         from,
         `✅ *Account Linked!*\n\n` +
@@ -812,7 +810,7 @@ async function dispatch(ctx: CommandContext): Promise<void> {
       return;
 
     case "spawncard":
-      if (ctx.isOwner || !!getStaff(sender)) {
+      if (ctx.isOwner || !!(await getStaff(senderPhone))) {
         const { spawnCard } = await import("./cardspawn.js");
         return spawnCard(ctx.sock as any, from);
       }
@@ -898,22 +896,15 @@ async function dispatch(ctx: CommandContext): Promise<void> {
       const incomingLidNum = ctx.senderRaw.endsWith("@lid") ? ctx.senderRaw.split("@")[0] : null;
 
       // Check by the CLAIMED phone number (rawPhone) — that's the canonical key
-      const { getDb: getDbCheck } = await import("../db/database.js");
-      const dbCheck = getDbCheck();
-      const alreadyUser = dbCheck.prepare(
-        "SELECT * FROM users WHERE id = ? OR phone = ? LIMIT 1"
-      ).get(rawPhone, rawPhone) as any;
+      const { col: colReg } = await import("../db/mongo.js");
+      const alreadyUser = await colReg("users").findOne({ $or: [{ _id: rawPhone }, { phone: rawPhone }] });
 
       // 3a: fully registered already — gate closed
       if (alreadyUser?.registered) {
         // Link this WhatsApp lid to the existing web-registered row so future
-        // commands (which arrive as @lid JIDs) resolve correctly. Without this,
-        // a user who registered on the website and then types ".reg <phone>"
-        // from WhatsApp gets told "already registered" but every other command
-        // still fails as "not registered", because the lid was never stored.
+        // commands (which arrive as @lid JIDs) resolve correctly.
         if (incomingLidNum) {
-          const { linkUserLid: linkExistingLid } = await import("../db/queries.js");
-          linkExistingLid(rawPhone, incomingLidNum);
+          await linkUserLid(rawPhone, incomingLidNum);
         }
         await sendText(from, "✅ *This number is already registered.*\n\nType *.p* to view your profile or visit the website to log in.");
         return;
@@ -922,17 +913,17 @@ async function dispatch(ctx: CommandContext): Promise<void> {
       // 4: brand new user — anchor the phone before OTP so no orphan rows form
       if (!alreadyUser) {
         const ghostNow = Math.floor(Date.now() / 1000);
-        dbCheck.prepare(
-          "INSERT OR IGNORE INTO users (id, phone, lid, registered, created_at, updated_at) VALUES (?, ?, ?, 0, ?, ?)"
-        ).run(rawPhone, rawPhone, incomingLidNum, ghostNow, ghostNow);
+        await colReg("users").insertOne({ _id: rawPhone, phone: rawPhone, lid: incomingLidNum, registered: 0, created_at: ghostNow, updated_at: ghostNow });
       }
 
       // 3b / 4 continued: generate OTP and send to sender's DM
       const regCode = String(Math.floor(100000 + Math.random() * 900000));
       const regExpiry = Math.floor(Date.now() / 1000) + 300;
-      dbCheck.prepare(
-        "INSERT OR REPLACE INTO whatsapp_link_otps (wa_sender, phone, code, expires_at) VALUES (?, ?, ?, ?)"
-      ).run(senderPhone2, rawPhone, regCode, regExpiry);
+      await colReg("whatsapp_link_otps").replaceOne(
+        { wa_sender: senderPhone2 },
+        { wa_sender: senderPhone2, phone: rawPhone, code: regCode, expires_at: regExpiry },
+        { upsert: true }
+      );
       try {
         await ctx.sock.sendMessage(`${senderPhone2}@s.whatsapp.net`, {
           text:
@@ -944,7 +935,7 @@ async function dispatch(ctx: CommandContext): Promise<void> {
         });
         await sendText(from, `📲 *Code sent to your private messages.*\n\nCheck your DM from this bot and type *.verify <code>* here to link your account.`);
       } catch {
-        dbCheck.prepare("DELETE FROM whatsapp_link_otps WHERE wa_sender = ?").run(senderPhone2);
+        await colReg("whatsapp_link_otps").deleteOne({ wa_sender: senderPhone2 });
         await sendText(from, "❌ Couldn't send the code to your DM. Open a private chat with this bot first, then try again.");
       }
       return;
@@ -1038,6 +1029,7 @@ async function dispatch(ctx: CommandContext): Promise<void> {
     case "stardust":
     case "vs":
     case "auction":
+    case "auctions":
     case "myauc":
     case "remauc":
     case "listauc":
@@ -1061,6 +1053,9 @@ async function dispatch(ctx: CommandContext): Promise<void> {
     case "sc":
     case "deletecard":
     case "delcard":
+    case "forge":
+    case "fuse":
+    case "fusion":
       return handleCards(ctx);
 
     case "tictactoe":
@@ -1102,6 +1097,7 @@ async function dispatch(ctx: CommandContext): Promise<void> {
     case "wyr":
     case "joke":
     case "fancy":
+    case "rizz":
       return handleFun(ctx);
 
     case "hug":
@@ -1121,24 +1117,31 @@ async function dispatch(ctx: CommandContext): Promise<void> {
     case "bonk":
     case "tickle":
     case "shrug":
+    case "bite":
+    case "cry":
+    case "blush":
       return handleInteraction(ctx);
 
     case "adventure":
     case "rpg":
+    case "rpgstats":
     case "dungeon":
     case "heal":
     case "quest":
     case "raid":
     case "class":
     case "skill":
+    case "achievements":
+    case "achieve":
+    case "arcane":
     case "attack":
     case "heavy":
     case "defend":
     case "special":
+    case "item":
     case "flee":
     case "explore":
     case "rest":
-    case "item":
       return handleRpg(ctx);
 
     case "ai":
@@ -1207,6 +1210,8 @@ async function dispatch(ctx: CommandContext): Promise<void> {
     case "rules":
     case "addrole":
     case "fetchcards":
+    case "summon":
+    case "restart":
       return handleStaff(ctx);
 
     case "pullcards":

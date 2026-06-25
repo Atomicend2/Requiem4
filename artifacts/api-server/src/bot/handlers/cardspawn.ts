@@ -17,30 +17,28 @@ import { randomUUID } from "node:crypto";
 
 const execFileAsync = promisify(execFile);
 
-/**
- * Ensure the buffer is a lightweight mp4.
- * Accepts GIF, webm, or already-mp4 input.
- * Falls back to the original buffer if ffmpeg is unavailable or conversion fails.
- */
 async function ensureMp4(buf: Buffer, cardId?: string | number): Promise<Buffer> {
-  // Already mp4 — check ftyp box magic bytes
   const isMp4 = buf.length > 8 && buf.slice(4, 8).toString("ascii") === "ftyp";
   if (isMp4) return buf;
 
-  const inExt = isGifBuffer(buf) ? "gif" : "webm";
-  const inPath  = `${tmpdir()}/card_${cardId ?? randomUUID()}_in.${inExt}`;
-  const outPath = `${tmpdir()}/card_${cardId ?? randomUUID()}_out.mp4`;
+  const isGif = isGifBuffer(buf);
+  const inExt = isGif ? "gif" : "webm";
+  const uid = cardId ?? randomUUID();
+  const inPath  = `${tmpdir()}/card_${uid}_in.${inExt}`;
+  const outPath = `${tmpdir()}/card_${uid}_out.mp4`;
 
   try {
     await writeFile(inPath, buf);
+    const gifArgs = isGif ? ["-r", "15"] : [];
     await execFileAsync("ffmpeg", [
       "-y", "-i", inPath,
+      ...gifArgs,
       "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
       "-c:v", "libx264", "-preset", "fast", "-crf", "28",
       "-movflags", "+faststart",
       "-an",
       outPath,
-    ], { timeout: 20_000 });
+    ], { timeout: 60_000 });
     const mp4 = await readFile(outPath);
     return mp4;
   } catch (err) {
@@ -52,13 +50,15 @@ async function ensureMp4(buf: Buffer, cardId?: string | number): Promise<Buffer>
   }
 }
 
-const MAX_SPAWNS_PER_DAY = 6;
+const MAX_SPAWNS_PER_DAY = 5;
 const SPAWN_MIN_SECS = 3600;
 const SPAWN_MAX_SECS = 28800;
 const ACTIVITY_REQUIRED = 30;
+const CARD_EXPIRY_MIN_SECS = 240;
+const CARD_EXPIRY_MAX_SECS = 300;
 
 const TIER_PRICES: Record<string, number> = {
-  T1: 500, T2: 1000, T3: 2500, T4: 5000, T5: 10000, T6: 15000, TS: 25000, TX: 50000, TZ: 100000,
+  T1: 3500, T2: 12000, T3: 27500, T4: 52500, T5: 62500, T6: 112000, TS: 250000, TX: 350000, TZ: 500000,
 };
 
 function randomSpawnDelay(): number {
@@ -67,40 +67,40 @@ function randomSpawnDelay(): number {
 
 export async function checkAutoSpawn(sock: WASocket, groupId: string): Promise<void> {
   try {
-    ensureGroup(groupId);
-    const group = getGroup(groupId);
+    await ensureGroup(groupId);
+    const group = await getGroup(groupId);
     if (!group) return;
 
     if ((group.cards_enabled || "on") !== "on") return;
     if ((group.spawn_enabled || "on") !== "on") return;
 
     const now = Math.floor(Date.now() / 1000);
-    let nextSpawn = getNextSpawnTime(groupId);
+    let nextSpawn = await getNextSpawnTime(groupId);
 
     if (nextSpawn === 0) {
       const delay = randomSpawnDelay();
-      setNextSpawnTime(groupId, now + delay);
+      await setNextSpawnTime(groupId, now + delay);
       return;
     }
 
     if (now < nextSpawn) return;
 
-    const activity = getGroupActivity(groupId);
+    const activity = await getGroupActivity(groupId);
     if (activity.percentage < ACTIVITY_REQUIRED) {
-      setNextSpawnTime(groupId, now + randomSpawnDelay());
+      await setNextSpawnTime(groupId, now + randomSpawnDelay());
       return;
     }
 
-    const todayCount = getTodaySpawnCount(groupId);
+    const todayCount = await getTodaySpawnCount(groupId);
     if (todayCount >= MAX_SPAWNS_PER_DAY) {
       const tomorrow = new Date();
       tomorrow.setDate(tomorrow.getDate() + 1);
       tomorrow.setHours(0, 0, 0, 0);
-      setNextSpawnTime(groupId, Math.floor(tomorrow.getTime() / 1000) + SPAWN_MIN_SECS + Math.floor(Math.random() * 14400));
+      await setNextSpawnTime(groupId, Math.floor(tomorrow.getTime() / 1000) + SPAWN_MIN_SECS + Math.floor(Math.random() * 14400));
       return;
     }
 
-    setNextSpawnTime(groupId, now + randomSpawnDelay());
+    await setNextSpawnTime(groupId, now + randomSpawnDelay());
     await spawnCard(sock, groupId);
   } catch (err) {
     logger.error({ err }, "Error in checkAutoSpawn");
@@ -111,55 +111,60 @@ const HIGH_TIER_MAX_ISSUES = 3;
 const NORMAL_MAX_ISSUES = 2;
 
 function getMaxIssues(tier: string): number {
-  // TX and TZ are ultra-rare — only 1 copy can ever exist.
   if (tier === "TX" || tier === "TZ") return 1;
-  // T5, T6, and TS are high-tier — allow up to 3 copies.
   if (tier === "T5" || tier === "T6" || tier === "TS") return HIGH_TIER_MAX_ISSUES;
   return NORMAL_MAX_ISSUES;
 }
 
 export async function spawnCard(sock: WASocket, groupId: string, specific?: string): Promise<void> {
-  const existing = getActiveSpawn(groupId);
+  const existing = await getActiveSpawn(groupId);
   if (existing) return;
 
-  const allCards = getAllCards();
+  const allCards = await getAllCards();
   if (allCards.length === 0) {
-    logger.warn({ groupId }, "Cannot spawn card — database is empty. Run bot startup or trigger card loader.");
+    logger.warn({ groupId }, "Cannot spawn card — database is empty.");
     return;
   }
 
   let card: any;
   if (specific) {
-    card = allCards.find((c) => c.id === specific) || getWeightedRandomCard(allCards);
+    card = allCards.find((c) => String(c.id) === String(specific));
+    if (!card) card = getWeightedRandomCard(allCards);
   } else {
-    const recentIds = getRecentSpawnedCardIds(groupId);
-    const nonRecentCards = allCards.filter((c) => !recentIds.includes(c.id));
-    const pool = nonRecentCards.length > 0 ? nonRecentCards : allCards;
+    const recentIds = await getRecentSpawnedCardIds(groupId);
+    const spawnableCards = allCards.filter((c) => c.tier !== "TX" && c.tier !== "TZ");
+    const nonRecentCards = spawnableCards.filter((c) => !recentIds.includes(c.id));
+    const pool = nonRecentCards.length > 0 ? nonRecentCards : spawnableCards;
     card = getWeightedRandomCard(pool);
   }
   if (!card) return;
 
   const maxIssues = getMaxIssues(card.tier);
-  const ownerCount = getCardOwnerCount(card.id);
+  const ownerCount = await getCardOwnerCount(card.id);
   const issueNum = ownerCount + 1;
 
   if (issueNum > maxIssues) {
-    const fallbackPool = allCards.filter((c) => getCardOwnerCount(c.id) < getMaxIssues(c.tier));
+    const eligibleCards = allCards.filter((c) => c.tier !== "TX" && c.tier !== "TZ");
+    const ownerCounts = await Promise.all(eligibleCards.map((c) => getCardOwnerCount(c.id)));
+    const fallbackPool = eligibleCards.filter((c, i) => ownerCounts[i] < getMaxIssues(c.tier));
     if (fallbackPool.length === 0) return;
     card = getWeightedRandomCard(fallbackPool);
     if (!card) return;
   }
 
-  const currentIssue = getCardOwnerCount(card.id) + 1;
+  const currentIssue = (await getCardOwnerCount(card.id)) + 1;
   const maxIssuesFinal = getMaxIssues(card.tier);
 
-  // Generate unique lowercase alphanumeric claim code (6 chars)
   const claimChars = "abcdefghijklmnopqrstuvwxyz0123456789";
   const token = Array.from({ length: 6 }, () => claimChars[Math.floor(Math.random() * claimChars.length)]).join("");
 
-  spawnCardInGroup(groupId, card.id, token);
-  recordSpawnForGroup(groupId);
-  recordRecentSpawnedCard(groupId, card.id);
+  const expiryOffset = CARD_EXPIRY_MIN_SECS + Math.floor(Math.random() * (CARD_EXPIRY_MAX_SECS - CARD_EXPIRY_MIN_SECS));
+  const expiresAt = Math.floor(Date.now() / 1000) + expiryOffset;
+  const expiryMins = Math.ceil(expiryOffset / 60);
+
+  await spawnCardInGroup(groupId, card.id, token, undefined, expiresAt);
+  await recordSpawnForGroup(groupId);
+  await recordRecentSpawnedCard(groupId, card.id);
 
   const tierPrice = TIER_PRICES[card.tier] || 500;
 
@@ -170,22 +175,73 @@ export async function spawnCard(sock: WASocket, groupId: string, specific?: stri
     `*⭐ Tier:* ${card.tier}\n` +
     `*📋 Issue:* ${currentIssue}\n` +
     `*🏷️ Price:* $${formatNumber(tierPrice)}\n\n` +
-    `> Type \`.claim ${token}\` to claim!`;
+    `> Type \`.claim ${token}\` to claim!\n` +
+    `> ⏳ Expires in *${expiryMins} minutes* — claim fast!`;
 
   try {
-    const buf = await getCardImageBuffer(card);
     if (VIDEO_TIERS.has(card.tier)) {
-      // All animated tiers must be sent as mp4 — never as a static image or GIF.
-      // getCardImageBuffer may return a GIF, webm, or already-mp4 buffer; normalise to mp4.
       const { getAnySock } = await import("../connection.js");
       const activeSock = getAnySock();
-      if (activeSock) {
+      if (!activeSock) {
+        const buf = await getCardImageBuffer(card);
+        await sendImage(groupId, buf, caption);
+      } else if (!card.image_data) {
+        let mediaUrl: string | null = card.media_url || null;
+        if (!mediaUrl && card.raw_data) {
+          try {
+            const raw = typeof card.raw_data === "string" ? JSON.parse(card.raw_data) : card.raw_data;
+            mediaUrl = raw?.media_url || null;
+          } catch {}
+        }
+        if (!mediaUrl && card.shoob_id) {
+          const hasWebm = card.has_webm === 1 || card.has_webm === true;
+          mediaUrl = hasWebm
+            ? `https://api.shoob.gg/site/api/cardr/${card.shoob_id}?type=webm`
+            : `https://api.shoob.gg/site/api/cardr/${card.shoob_id}?size=400`;
+        }
+        if (mediaUrl) {
+          const hasWebm = card.has_webm === 1 || card.has_webm === true;
+          if (hasWebm) {
+            try {
+              const res = await fetch(mediaUrl, {
+                headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+                signal: AbortSignal.timeout(20000),
+              });
+              const buf = res.ok ? Buffer.from(await res.arrayBuffer()) : await getCardImageBuffer(card);
+              const mp4Buf = await ensureMp4(buf, card.id);
+              await activeSock.sendMessage(groupId, { video: mp4Buf, gifPlayback: true, mimetype: "video/mp4", caption });
+            } catch {
+              const buf = await getCardImageBuffer(card);
+              const mp4Buf = await ensureMp4(buf, card.id);
+              await activeSock.sendMessage(groupId, { video: mp4Buf, gifPlayback: true, mimetype: "video/mp4", caption });
+            }
+          } else {
+            try {
+              const res = await fetch(mediaUrl, {
+                headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+                signal: AbortSignal.timeout(20000),
+              });
+              const buf = res.ok ? Buffer.from(await res.arrayBuffer()) : await getCardImageBuffer(card);
+              const mp4Buf = await ensureMp4(buf, card.id);
+              await activeSock.sendMessage(groupId, { video: mp4Buf, gifPlayback: true, mimetype: "video/mp4", caption });
+            } catch {
+              const buf = await getCardImageBuffer(card);
+              const mp4Buf = await ensureMp4(buf, card.id);
+              await activeSock.sendMessage(groupId, { video: mp4Buf, gifPlayback: true, mimetype: "video/mp4", caption });
+            }
+          }
+        } else {
+          const buf = await getCardImageBuffer(card);
+          const mp4Buf = await ensureMp4(buf, card.id);
+          await activeSock.sendMessage(groupId, { video: mp4Buf, gifPlayback: true, mimetype: "video/mp4", caption });
+        }
+      } else {
+        const buf = await getCardImageBuffer(card);
         const mp4Buf = await ensureMp4(buf, card.id);
         await activeSock.sendMessage(groupId, { video: mp4Buf, gifPlayback: true, mimetype: "video/mp4", caption });
-      } else {
-        await sendImage(groupId, buf, caption);
       }
     } else {
+      const buf = await getCardImageBuffer(card);
       await sendImage(groupId, buf, caption);
     }
     logger.info({ cardId: card.id, cardName: card.name, tier: card.tier, groupId }, "Card spawned successfully");
@@ -202,9 +258,9 @@ export async function handleGetCard(
   senderId: string,
   cardId: string
 ): Promise<void> {
-  const spawn = getActiveSpawnByToken(groupId, cardId);
+  const spawn = await getActiveSpawnByToken(groupId, cardId);
   if (!spawn) {
-    const anySpawn = getActiveSpawn(groupId);
+    const anySpawn = await getActiveSpawn(groupId);
     if (!anySpawn) {
       await sendText(groupId, "❌ There's no active card spawn right now.");
     } else {
@@ -213,26 +269,26 @@ export async function handleGetCard(
     return;
   }
 
-  ensureUser(senderId);
+  await ensureUser(senderId);
 
-  const alreadyOwned = getUserCards(senderId).some((c: any) => c.id === spawn.card_id);
+  const userCards = await getUserCards(senderId);
+  const alreadyOwned = userCards.some((c: any) => c.id === spawn.card_id);
   if (alreadyOwned) {
     await sendText(groupId, "❌ You already own this card! Each card can only be claimed once per user.");
     return;
   }
 
-  const card = getCard(spawn.card_id);
+  const card = await getCard(spawn.card_id);
   const maxIssues = getMaxIssues(card?.tier || "T1");
-  const currentOwners = getCardOwnerCount(spawn.card_id);
+  const currentOwners = await getCardOwnerCount(spawn.card_id);
 
   if (currentOwners >= maxIssues) {
     await sendText(groupId, `❌ This card has reached its maximum issues (${maxIssues}/${maxIssues}).`);
     return;
   }
 
-  // Balance check — claiming costs coins based on tier
   const tierPrice = TIER_PRICES[card?.tier || "T1"] || 500;
-  const claimerUser = getUser(senderId);
+  const claimerUser = await getUser(senderId);
   const claimerBalance = claimerUser?.balance ?? 0;
   if (claimerBalance < tierPrice) {
     await sendText(groupId,
@@ -244,14 +300,11 @@ export async function handleGetCard(
     return;
   }
 
-  claimSpawn(spawn.id, senderId);
-  giveCard(senderId, spawn.card_id);
-  updateUser(senderId, { balance: claimerBalance - tierPrice });
+  await claimSpawn(spawn.id, senderId);
+  await giveCard(senderId, spawn.card_id);
+  void updateUser(senderId, { balance: claimerBalance - tierPrice });
 
   const issueNum = currentOwners + 1;
-
-  // Strip both the @server suffix and any :device suffix so the display
-  // is the plain phone number (e.g. 2547xxx, not 2547xxx:3).
   const senderDisplay = senderId.split("@")[0].split(":")[0];
   await sendText(
     groupId,
@@ -266,12 +319,10 @@ export async function handleGetCard(
 }
 
 async function getCardImageBuffer(card: any): Promise<Buffer> {
-  // 1. Stored blob (custom uploaded cards)
   if (card.image_data) {
     return Buffer.isBuffer(card.image_data) ? card.image_data : Buffer.from(card.image_data);
   }
   
-  // 2. media_url direct OR inside raw_data JSON (scraped cards from cards.json)
   let mediaUrl: string | null = card.media_url || null;
   if (!mediaUrl && card.raw_data) {
     try {
@@ -282,7 +333,6 @@ async function getCardImageBuffer(card: any): Promise<Buffer> {
     }
   }
   
-  // 3. Build CDN URL from shoob_id as final fallback
   if (!mediaUrl && card.shoob_id) {
     const hasWebm = card.has_webm === 1 || card.has_webm === true;
     mediaUrl = hasWebm
@@ -300,9 +350,6 @@ async function getCardImageBuffer(card: any): Promise<Buffer> {
       if (res.ok) {
         const contentType = res.headers.get("content-type") || "";
         const buf = Buffer.from(await res.arrayBuffer());
-        logger.debug({ cardId: card.id, size: buf.length, contentType }, "Successfully fetched card image");
-        // Return animated buffers as-is — ensureMp4() will convert them to mp4
-        // before sending. Never run sharp on a GIF/webm or it becomes a static JPEG.
         if (
           contentType.includes("gif") || contentType.includes("webm") ||
           contentType.includes("video") || isGifBuffer(buf)
@@ -316,11 +363,8 @@ async function getCardImageBuffer(card: any): Promise<Buffer> {
     } catch (err) {
       logger.warn({ err, cardId: card.id, mediaUrl }, "Failed to fetch card image from CDN");
     }
-  } else {
-    logger.debug({ cardId: card.id, hasImageData: !!card.image_data, hasShoobId: !!card.shoob_id }, "No media URL available");
   }
   
-  logger.info({ cardId: card.id }, "Generating placeholder for card (no image available)");
   return makeCardPlaceholder(card);
 }
 

@@ -1,86 +1,83 @@
 import { Router } from "express";
-import { getDb } from "../../bot/db/database.js";
+import { col } from "../../bot/db/mongo.js";
 
 const router = Router();
 
-router.get("/", (req, res) => {
-  const db = getDb();
-  const search = req.query.search as string | undefined;
+router.get("/", async (req, res) => {
+  try {
+    const search = req.query.search as string | undefined;
+    const filter: any = {};
+    if (search) filter.name = { $regex: search, $options: "i" };
 
-  let query = `
-    SELECT g.*, u.name as owner_name,
-      COUNT(gm.user_id) as member_count
-    FROM guilds g
-    LEFT JOIN users u ON u.id = g.owner_id
-    LEFT JOIN guild_members gm ON gm.guild_id = g.id
-  `;
-  const params: any[] = [];
+    const guilds = await col("guilds").find(filter).sort({ level: -1 }).toArray();
+    const guildIds = guilds.map((g) => g._id);
+    const memberCounts = await col("guild_members")
+      .aggregate([
+        { $match: { guild_id: { $in: guildIds as any[] } } },
+        { $group: { _id: "$guild_id", count: { $sum: 1 } } },
+      ])
+      .toArray();
+    const countMap = new Map(memberCounts.map((m) => [String(m._id), m.count]));
 
-  if (search) {
-    query += " WHERE LOWER(g.name) LIKE LOWER(?)";
-    params.push(`%${search}%`);
+    const ownerIds = guilds.map((g) => g.owner_id).filter(Boolean);
+    const owners = await col("users").find({ _id: { $in: ownerIds as any[] } }).project({ _id: 1, name: 1 }).toArray();
+    const ownerMap = new Map(owners.map((o) => [String(o._id), o.name]));
+
+    res.json({
+      guilds: guilds.map((g: any) => ({
+        id: g._id,
+        name: g.name,
+        description: g.description || "",
+        level: g.level || 1,
+        memberCount: countMap.get(String(g._id)) || 0,
+        ownerName: ownerMap.get(String(g.owner_id)) || "Unknown",
+        createdAt: g.created_at || 0,
+      })),
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message });
   }
-  query += " GROUP BY g.id ORDER BY g.level DESC, member_count DESC";
-
-  const guilds = db.prepare(query).all(...params) as any[];
-
-  res.json({
-    guilds: guilds.map((g: any) => ({
-      id: g.id,
-      name: g.name,
-      description: g.description || "",
-      level: g.level || 1,
-      memberCount: Number(g.member_count) || 0,
-      ownerName: g.owner_name || "Unknown",
-      createdAt: g.created_at || 0,
-    })),
-  });
 });
 
-router.get("/:guildId", (req, res) => {
-  const db = getDb();
-  const { guildId } = req.params;
+router.get("/:guildId", async (req, res) => {
+  try {
+    const { guildId } = req.params;
+    const guild = await col("guilds").findOne({ _id: guildId as any });
+    if (!guild) { res.status(404).json({ success: false, message: "Guild not found" }); return; }
 
-  const guild = db.prepare(`
-    SELECT g.*, u.name as owner_name,
-      COUNT(gm.user_id) as member_count
-    FROM guilds g
-    LEFT JOIN users u ON u.id = g.owner_id
-    LEFT JOIN guild_members gm ON gm.guild_id = g.id
-    WHERE g.id = ?
-    GROUP BY g.id
-  `).get(guildId) as any;
+    const [memberDocs, memberCount, owner] = await Promise.all([
+      col("guild_members").find({ guild_id: guildId }).sort({ joined_at: 1 }).toArray(),
+      col("guild_members").countDocuments({ guild_id: guildId }),
+      guild.owner_id ? col("users").findOne({ _id: guild.owner_id as any }, { projection: { name: 1 } }) : null,
+    ]);
 
-  if (!guild) {
-    res.status(404).json({ success: false, message: "Guild not found" });
-    return;
+    const memberUserIds = memberDocs.map((m) => m.user_id);
+    const memberUsers = await col("users").find({ _id: { $in: memberUserIds as any[] } }).project({ _id: 1, name: 1, level: 1 }).toArray();
+    const userMap = new Map(memberUsers.map((u) => [String(u._id), u]));
+
+    res.json({
+      guild: {
+        id: guild._id,
+        name: guild.name,
+        description: guild.description || "",
+        level: guild.level || 1,
+        memberCount,
+        ownerName: owner?.name || "Unknown",
+        createdAt: guild.created_at || 0,
+      },
+      members: memberDocs.map((m: any) => {
+        const u = userMap.get(String(m.user_id)) as any;
+        return {
+          userId: m.user_id,
+          name: u?.name || "Shadow",
+          level: u?.level || 1,
+          joinedAt: m.joined_at || 0,
+        };
+      }),
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message });
   }
-
-  const members = db.prepare(`
-    SELECT gm.user_id, gm.joined_at, u.name, u.level
-    FROM guild_members gm
-    LEFT JOIN users u ON u.id = gm.user_id
-    WHERE gm.guild_id = ?
-    ORDER BY u.level DESC, gm.joined_at ASC
-  `).all(guildId) as any[];
-
-  res.json({
-    guild: {
-      id: guild.id,
-      name: guild.name,
-      description: guild.description || "",
-      level: guild.level || 1,
-      memberCount: Number(guild.member_count) || 0,
-      ownerName: guild.owner_name || "Unknown",
-      createdAt: guild.created_at || 0,
-    },
-    members: members.map((m: any) => ({
-      userId: m.user_id,
-      name: m.name || "Shadow",
-      level: m.level || 1,
-      joinedAt: m.joined_at || 0,
-    })),
-  });
 });
 
 export { router as guildsRouter };

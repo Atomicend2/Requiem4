@@ -323,6 +323,26 @@ export async function handleFun(ctx: CommandContext): Promise<void> {
     return;
   }
 
+  if (cmd === "rizz") {
+    const targetId = getFunTarget(ctx);
+    const targetName = funGetName(targetId);
+    const score = Math.floor(Math.random() * 101);
+    const tier =
+      score >= 95 ? "🌟 Sigma Rizz — you make people question their orientation" :
+      score >= 80 ? "🔥 High Rizz — effortlessly charming" :
+      score >= 60 ? "😎 Mid Rizz — solid, gets the job done" :
+      score >= 40 ? "🫤 Low Rizz — trying, but struggling" :
+      score >= 20 ? "💀 Negative Rizz — somehow makes it worse" :
+                    "☠️ Rizz -999 — certified NPC";
+    const filled = Math.round((score / 100) * 10);
+    const bar = "█".repeat(filled) + "░".repeat(10 - filled);
+    await sock.sendMessage(from, {
+      text: `✨ *Rizz Meter* — @${targetName}\n\n[${bar}] ${score}%\n\n${tier}`,
+      mentions: [targetId],
+    });
+    return;
+  }
+
   if (cmd === "wouldyourather" || cmd === "wyr") {
     const q = WYR[Math.floor(Math.random() * WYR.length)];
     await sendText(from, `🤔 *Would You Rather...*\n\n${q}`);

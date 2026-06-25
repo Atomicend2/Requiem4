@@ -1,7 +1,7 @@
 import type { CommandContext } from "./index.js";
 import { sendText } from "../connection.js";
 import { setAfk, removeAfk, getAfk, getMentionName } from "../db/queries.js";
-import { timeAgo } from "../utils.js";
+import { timeAgo, mentionTag } from "../utils.js";
 
 export async function handleAfk(ctx: CommandContext): Promise<void> {
   const { from, sender, args } = ctx;
@@ -40,7 +40,7 @@ export async function checkAfkMention(
     const afk = getAfk(m);
     if (afk) {
       await sock.sendMessage(from, {
-        text: `🔴 @${getMentionName(m)} is AFK: "${afk.reason}" (since ${timeAgo(afk.started_at)})`,
+        text: `🔴 ${mentionTag(m)} is AFK: "${afk.reason}" (since ${timeAgo(afk.started_at)})`,
         mentions: [m],
       });
     }

@@ -31,7 +31,7 @@ import type { CommandContext } from "./index.js";
 import { getBotSetting, setBotSetting, deleteBotSetting, getStaff } from "../db/queries.js";
 import { isOwnerPhone, sendText } from "../connection.js";
 import { logger } from "../../lib/logger.js";
-import { getDb } from "../db/database.js";
+import { col } from "../db/mongo.js";
 import { getPersona, DEFAULT_PERSONA, type PersonaKey, type PersonaDef } from "./personas.js";
 import { getPersonaForSock } from "../bot-manager.js";
 import axios from "axios";
@@ -409,19 +409,17 @@ function stickerKey(name: string) {
   return `echidna:sticker:${name.toLowerCase().replace(/\s+/g, "_")}`;
 }
 
-function listStickerNames(): string[] {
-  const db = getDb();
-  const rows = db.prepare(
-    "SELECT key FROM bot_settings WHERE key LIKE 'echidna:sticker:%'"
-  ).all() as Array<{ key: string }>;
-  return rows.map(r => r.key.replace("echidna:sticker:", "").replace(/_/g, " "));
+async function listStickerNames(): Promise<string[]> {
+  const prefix = "echidna:sticker:";
+  const rows = await col("bot_settings").find({ _id: { $regex: `^${prefix}` } }).toArray();
+  return rows.map((r: any) => String(r._id).replace(prefix, "").replace(/_/g, " "));
 }
 
-function getRandomSticker(): Buffer | null {
-  const names = listStickerNames();
+async function getRandomSticker(): Promise<Buffer | null> {
+  const names = await listStickerNames();
   if (!names.length) return null;
   const pick = names[Math.floor(Math.random() * names.length)];
-  return getBotSetting(stickerKey(pick));
+  return await getBotSetting(stickerKey(pick));
 }
 
 /** Decide whether Echidna should send a sticker-only reply this turn */
@@ -432,10 +430,10 @@ function shouldSendStickerOnly(messageCount: number): boolean {
 
 // ─── Permission check ─────────────────────────────────────────────────────────
 
-function isModOrAbove(sender: string): boolean {
+async function isModOrAbove(sender: string): Promise<boolean> {
   const phone = sender.split("@")[0].split(":")[0];
   if (isOwnerPhone(phone)) return true;
-  const staff = getStaff(sender);
+  const staff = await getStaff(sender);
   return staff?.role === "mod" || staff?.role === "guardian";
 }
 
@@ -504,9 +502,9 @@ export async function handleEchidnaMessage(
   const userName = state.memory.nickname || state.memory.name || pushName || userId;
 
   // Possibly send a sticker-only reply
-  const stickers = listStickerNames();
+  const stickers = await listStickerNames();
   if (stickers.length > 0 && shouldSendStickerOnly(state.messageCount)) {
-    const buf = getRandomSticker();
+    const buf = await getRandomSticker();
     if (buf) {
       await sock.sendMessage(from, { sticker: buf }, quotedMsg ? { quoted: quotedMsg as any } : undefined).catch(() => {});
       saveUserState(userId, persona.key, state);
@@ -571,7 +569,7 @@ export async function handleEchidnaMessage(
 
   // After text, optionally send a mood/affinity sticker if we have one
   if (stickers.length > 0 && state.affinity > 40 && Math.random() < 0.12) {
-    const stickerBuf = getBotSetting(stickerKey(state.mood)) || getRandomSticker();
+    const stickerBuf = await getBotSetting(stickerKey(state.mood)) || await getRandomSticker();
     if (stickerBuf) {
       await new Promise(r => setTimeout(r, 800));
       await sock.sendMessage(from, { sticker: stickerBuf }).catch(() => {});
@@ -585,7 +583,7 @@ export async function handleBotReply(ctx: CommandContext): Promise<void> {
   const { from, sender, args, sock, msg, command } = ctx;
   const persona = getPersona(getPersonaForSock(sock));
 
-  if (!isModOrAbove(sender)) {
+  if (!(await isModOrAbove(sender))) {
     await sendText(from, "❌ Only mods, guardians, and the owner can use this command.");
     return;
   }
@@ -599,7 +597,7 @@ export async function handleBotReply(ctx: CommandContext): Promise<void> {
     }
     const isOn = val === "on";
     const { updateGroup } = await import("../db/queries.js");
-    updateGroup(from, { echidna_chat: isOn ? "on" : "off" });
+    await updateGroup(from, { echidna_chat: isOn ? "on" : "off" });
     const statusLine = isOn
       ? `╔══════════════════════╗\n║  🤖 𝗔𝗨𝗧𝗢-𝗥𝗘𝗣𝗟𝗬  ·  𝗢𝗡  ║\n╚══════════════════════╝\n\n${persona.shortLabel} will now respond to *every message* in this group.`
       : `╔══════════════════════╗\n║  🔇 𝗔𝗨𝗧𝗢-𝗥𝗘𝗣𝗟𝗬  ·  𝗢𝗙𝗙 ║\n╚══════════════════════╝\n\n${persona.shortLabel} will only respond when *@mentioned* or *replied to*.`;
@@ -611,7 +609,7 @@ export async function handleBotReply(ctx: CommandContext): Promise<void> {
 
   // ── .botreply list
   if (!sub || sub === "list") {
-    const names = listStickerNames();
+    const names = await listStickerNames();
     if (!names.length) {
       await sendText(from, `🎴 No ${persona.shortLabel} stickers saved yet.\n\nUse \`.botreply sticker [name]\` while quoting a sticker to add one.`);
       return;
@@ -627,7 +625,7 @@ export async function handleBotReply(ctx: CommandContext): Promise<void> {
       await sendText(from, "❌ Usage: `.botreply delete [name]`");
       return;
     }
-    deleteBotSetting(stickerKey(name));
+    await deleteBotSetting(stickerKey(name));
     await sendText(from, `🗑️ Deleted sticker: *${name}*`);
     return;
   }
@@ -659,7 +657,7 @@ export async function handleBotReply(ctx: CommandContext): Promise<void> {
       const buffer = await downloadMediaMessage(fakeMsg, "buffer", {}, { reuploadRequest: sock.updateMediaMessage });
       if (!buffer || !Buffer.isBuffer(buffer)) throw new Error("empty buffer");
 
-      setBotSetting(stickerKey(name), buffer as Buffer);
+      await setBotSetting(stickerKey(name), buffer as Buffer);
       await sendText(from, `✅ Sticker saved as: *${name}*\n\n${persona.shortLabel} will use it in replies.`);
     } catch (err) {
       logger.error({ err }, "Failed to save Echidna sticker");
@@ -683,7 +681,7 @@ export async function handleBotReply(ctx: CommandContext): Promise<void> {
     }
     const isOn = val === "on";
     const { updateGroup } = await import("../db/queries.js");
-    updateGroup(from, { echidna_chat: isOn ? "on" : "off" });
+    await updateGroup(from, { echidna_chat: isOn ? "on" : "off" });
     const statusLine = isOn
       ? `╔══════════════════════╗\n║  🤖 𝗔𝗨𝗧𝗢-𝗥𝗘𝗣𝗟𝗬  ·  𝗢𝗡  ║\n╚══════════════════════╝\n\n${persona.shortLabel} will now respond to *every message* in this group.`
       : `╔══════════════════════╗\n║  🔇 𝗔𝗨𝗧𝗢-𝗥𝗘𝗣𝗟𝗬  ·  𝗢𝗙𝗙 ║\n╚══════════════════════╝\n\n${persona.shortLabel} will only respond when *@mentioned* or *replied to*.`;

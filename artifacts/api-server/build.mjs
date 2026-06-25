@@ -32,6 +32,7 @@ async function buildAll() {
     external: [
       "*.node",
       "sharp",
+      "mongodb",
       "@whiskeysockets/baileys",
       "@hapi/boom",
       "jimp",

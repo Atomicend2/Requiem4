@@ -5,8 +5,9 @@ import {
   getShop, getShopItem, getRichList, ensureRpg, getUserRank, getUserGuild, isBanned, getStaff, isMod,
   getXpLeaderboard, isBot, getAllFrames, getFrameById, equipFrame, getMentionName,
 } from "../db/queries.js";
-import { getDb } from "../db/database.js";
-import { formatNumber, timeAgo } from "../utils.js";
+import { col } from "../db/mongo.js";
+import { ObjectId } from "mongodb";
+import { formatNumber, timeAgo, mentionTag } from "../utils.js";
 import { resolveMentionedJid } from "../utils/identity.js";
 import sharp from "sharp";
 import path from "node:path";
@@ -78,15 +79,36 @@ const REGISTERED_ONLY_CMDS = new Set([
   "shop",
 ]);
 
+async function getBankCapExtra(userId: string): Promise<number> {
+  const results = await col("inventory").aggregate([
+    { $match: { user_id: userId, quantity: { $gt: 0 } } },
+    {
+      $lookup: {
+        from: "shop_items",
+        let: { item: { $toLower: "$item" } },
+        pipeline: [
+          { $match: { $expr: { $and: [
+            { $eq: [{ $toLower: "$name" }, "$$item"] },
+            { $regexMatch: { input: { $ifNull: ["$effect", ""] }, regex: "^bank_cap:" } },
+          ] } } },
+          { $project: { effect: 1, _id: 0 } },
+        ],
+        as: "si",
+      },
+    },
+    { $unwind: "$si" },
+    { $project: { quantity: 1, effect: "$si.effect" } },
+  ]).toArray();
+  return results.reduce((sum: number, row: any) => {
+    const cap = parseInt((row.effect as string).split(":")[1] || "0");
+    return sum + (isNaN(cap) ? 0 : cap * (row.quantity || 1));
+  }, 0);
+}
+
 export async function handleEconomy(ctx: CommandContext): Promise<void> {
   const { from, sender, args, command: cmd, groupMeta, resolvedMentions } = ctx;
 
-  const user = ensureUser(sender);
-  // Canonical DB key — always user.id (the phone number string), never the raw
-  // sender JID which can still be an @lid value on the very first message
-  // before DB-based LID resolution fires. Using user.id here means every
-  // inventory read/write, balance update, and query below targets the correct
-  // row regardless of what JID format `sender` happens to have.
+  const user = await ensureUser(sender);
   const userId = user?.id || sender.split("@")[0].split(":")[0];
   const now = Math.floor(Date.now() / 1000);
 
@@ -100,21 +122,9 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
     const wallet = user.balance || 0;
     const bank = user.bank || 0;
     const total = wallet + bank;
-    // Calculate account capacity from bank note effects (same logic as deposit)
-    const db = getDb();
-    const bankNotes = db.prepare(`
-      SELECT si.effect, i.quantity
-      FROM inventory i
-      JOIN shop_items si ON LOWER(si.name) = LOWER(i.item)
-      WHERE i.user_id = ? AND si.effect LIKE 'bank_cap:%' AND i.quantity > 0
-    `).all(userId) as any[];
     const BASE_CAP = 50_000;
-    const extraCap = bankNotes.reduce((sum, row) => {
-      const cap = parseInt((row.effect as string).split(":")[1] || "0");
-      return sum + (isNaN(cap) ? 0 : cap * row.quantity);
-    }, 0);
+    const extraCap = await getBankCapExtra(userId);
     const accountCapacity = BASE_CAP + extraCap;
-    // Show bank vs capacity (not total), so the bar reflects how full the bank is
     const pct = accountCapacity > 0 ? Math.min(100, Math.floor((bank / accountCapacity) * 100)) : 0;
     const filled = Math.round((pct / 100) * 10);
     const bar = "█".repeat(filled) + "░".repeat(10 - filled);
@@ -143,7 +153,7 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
       if (left > 0) {
         await sendText(from, `⭐ You have *Premium* status!\nExpires in: ${formatDuration(left)}`);
       } else {
-        updateUser(sender, { premium: 0 });
+        await updateUser(sender, { premium: 0 });
         await sendText(from, "❌ Your premium has expired.");
       }
     } else {
@@ -158,7 +168,7 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
     const xpNeeded = lvl * 100;
     await sendText(
       from,
-      `👤 *Membership — @${getMentionName(sender)}*\n\n` +
+      `👤 *Membership — ${mentionTag(sender)}*\n\n` +
       `🎖️ Level: ${lvl}\n` +
       `✨ XP: ${xp} / ${xpNeeded}\n` +
       `⭐ Premium: ${user.premium ? "Yes" : "No"}\n` +
@@ -177,22 +187,16 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
       return;
     }
     const amount = DAILY_AMOUNT + (user.premium ? 500 : 0);
-    updateUser(sender, { balance: (user.balance || 0) + amount, last_daily: now });
+    await updateUser(sender, { balance: (user.balance || 0) + amount, last_daily: now });
     await sendText(from, `🎁 Daily reward: *$${formatNumber(amount)}*!\nNew balance: $${formatNumber((user.balance || 0) + amount)}`);
     return;
   }
 
   if (cmd === "withdraw" || cmd === "wid" || cmd === "wd") {
     const amount = parseInt(args[0]);
-    if (isNaN(amount) || amount <= 0) {
-      await sendText(from, "❌ Enter a valid amount. Usage: .withdraw [amount]");
-      return;
-    }
-    if (amount > (user.bank || 0)) {
-      await sendText(from, `❌ Not enough in bank. Bank: $${formatNumber(user.bank || 0)}`);
-      return;
-    }
-    updateUser(sender, { bank: (user.bank || 0) - amount, balance: (user.balance || 0) + amount });
+    if (isNaN(amount) || amount <= 0) { await sendText(from, "❌ Enter a valid amount. Usage: .withdraw [amount]"); return; }
+    if (amount > (user.bank || 0)) { await sendText(from, `❌ Not enough in bank. Bank: $${formatNumber(user.bank || 0)}`); return; }
+    await updateUser(sender, { bank: (user.bank || 0) - amount, balance: (user.balance || 0) + amount });
     await sendText(from, `✅ Withdrew $${formatNumber(amount)} from bank.\nWallet: $${formatNumber((user.balance || 0) + amount)}`);
     return;
   }
@@ -201,48 +205,21 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
     const wallet = user.balance || 0;
     const parsed = parseInt(args[0]);
     const amount = (isNaN(parsed) || !args[0]) ? wallet : parsed;
-    if (amount <= 0) {
-      await sendText(from, "❌ Your wallet is empty.");
-      return;
-    }
-    if (amount > wallet) {
-      await sendText(from, `❌ Not enough in wallet. Wallet: $${formatNumber(wallet)}`);
-      return;
-    }
-
-    // Enforce bank capacity — default 100,000; expanded by Bank Notes
+    if (amount <= 0) { await sendText(from, "❌ Your wallet is empty."); return; }
+    if (amount > wallet) { await sendText(from, `❌ Not enough in wallet. Wallet: $${formatNumber(wallet)}`); return; }
     const BASE_CAP = 50_000;
-    const db2 = getDb();
-    const bankNotes = db2.prepare(`
-      SELECT si.effect, i.quantity
-      FROM inventory i
-      JOIN shop_items si ON LOWER(si.name) = LOWER(i.item)
-      WHERE i.user_id = ? AND si.effect LIKE 'bank_cap:%' AND i.quantity > 0
-    `).all(userId) as any[];
-
-    const extraCap = bankNotes.reduce((sum, row) => {
-      const cap = parseInt((row.effect as string).split(":")[1] || "0");
-      return sum + (isNaN(cap) ? 0 : cap * row.quantity);
-    }, 0);
+    const extraCap = await getBankCapExtra(userId);
     const bankCap = BASE_CAP + extraCap;
     const currentBank = user.bank || 0;
-
     if (currentBank >= bankCap) {
-      await sendText(from,
-        `❌ Your bank is full! (*$${formatNumber(currentBank)}* / *$${formatNumber(bankCap)}*)\n` +
-        `💡 Buy a *Bank Note* from the *.shop* to expand your bank capacity.`
-      );
+      await sendText(from, `❌ Your bank is full! (*$${formatNumber(currentBank)}* / *$${formatNumber(bankCap)}`+`*)\n💡 Buy a *Bank Note* from the *.shop* to expand your bank capacity.`);
       return;
     }
-
     const space = bankCap - currentBank;
     const actual = Math.min(amount, space);
-
-    updateUser(sender, { balance: wallet - actual, bank: currentBank + actual });
+    await updateUser(sender, { balance: wallet - actual, bank: currentBank + actual });
     let msg = `✅ Deposited *$${formatNumber(actual)}* to bank.\nBank: *$${formatNumber(currentBank + actual)}* / *$${formatNumber(bankCap)}*`;
-    if (actual < amount) {
-      msg += `\n⚠️ Only $${formatNumber(actual)} deposited — bank capacity reached. Buy a *Bank Note* to expand.`;
-    }
+    if (actual < amount) msg += `\n⚠️ Only $${formatNumber(actual)} deposited — bank capacity reached. Buy a *Bank Note* to expand.`;
     await sendText(from, msg);
     return;
   }
@@ -251,30 +228,19 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
     const info = ctx.msg.message?.extendedTextMessage?.contextInfo;
     const rawMentioned = resolvedMentions[0] || info?.participant;
     const amount = parseInt(args[args.length - 1]);
-    if (!rawMentioned || isNaN(amount) || amount <= 0) {
-      await sendText(from, "❌ Usage: .donate @user [amount] or reply with .donate [amount]");
-      return;
-    }
-    const mentioned = resolvedMentions[0]
-      ? resolvedMentions[0]
-      : resolveMentionedJid(rawMentioned, groupMeta);
-    if (isBot(mentioned)) {
-      await sendText(from, "❌ Bots are not part of the economy system.");
-      return;
-    }
-    if (amount > (user.balance || 0)) {
-      await sendText(from, "❌ Not enough in wallet.");
-      return;
-    }
-    const target = ensureUser(mentioned);
-    updateUser(sender, { balance: (user.balance || 0) - amount });
-    updateUser(mentioned, { balance: (target.balance || 0) + amount });
-    await sendText(from, `💸 @${getMentionName(sender)} donated $${formatNumber(amount)} to @${getMentionName(mentioned)}!`, [sender, mentioned]);
+    if (!rawMentioned || isNaN(amount) || amount <= 0) { await sendText(from, "❌ Usage: .donate @user [amount] or reply with .donate [amount]"); return; }
+    const mentioned = resolvedMentions[0] ? resolvedMentions[0] : resolveMentionedJid(rawMentioned, groupMeta);
+    if (await isBot(mentioned)) { await sendText(from, "❌ Bots are not part of the economy system."); return; }
+    if (amount > (user.balance || 0)) { await sendText(from, "❌ Not enough in wallet."); return; }
+    const target = await ensureUser(mentioned);
+    await updateUser(sender, { balance: (user.balance || 0) - amount });
+    await updateUser(mentioned, { balance: (target.balance || 0) + amount });
+    await sendText(from, `💸 ${mentionTag(sender)} donated $${formatNumber(amount)} to ${mentionTag(mentioned)}!`, [sender, mentioned]);
     return;
   }
 
   if (cmd === "cds") {
-    const rpg = ensureRpg(userId);
+    const rpg = await ensureRpg(userId);
     const allCooldowns: Array<{ emoji: string; name: string; cd: number; last: number }> = [
       { emoji: "📅", name: "Daily",       cd: DAILY_COOLDOWN,   last: user.last_daily || 0 },
       { emoji: "💼", name: "Work",        cd: WORK_COOLDOWN,    last: user.last_work || 0 },
@@ -310,7 +276,7 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
   }
 
   if (cmd === "richlist") {
-    const list = getRichList(from.endsWith("@g.us") ? from : undefined, 10);
+    const list = await getRichList(from.endsWith("@g.us") ? from : undefined, 10);
     const MEDALS = ["🥇", "🥈", "🥉"];
     let text = "╔ ❰ 🏆 Gᴄ Rɪᴄʜʟɪsᴛ ❱ ╗\n║  💰 Tᴏᴘ Mᴇᴍʙᴇʀs\n║\n";
     list.forEach((u, i) => {
@@ -326,7 +292,7 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
   }
 
   if (cmd === "richlistglobal" || cmd === "richlg") {
-    const list = getRichList(undefined, 10);
+    const list = await getRichList(undefined, 10);
     const MEDALS = ["🥇", "🥈", "🥉"];
     let text = "╔ ❰ 🏆 Gʟᴏʙᴀʟ Rɪᴄʜʟɪsᴛ ❱ ╗\n║ 🌍 Tᴏᴘ Pʟᴀʏᴇʀs\n║\n";
     list.forEach((u, i) => {
@@ -346,7 +312,6 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
       await sendText(from, "✅ *You're already registered.*\n\nType *.p* to see your profile.");
       return;
     }
-    // Old auto-registration is removed — identity must be verified via OTP.
     await sendText(
       from,
       `👋 *Welcome to Requiem Order 反逆!*\n\n` +
@@ -362,56 +327,35 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
 
   if (cmd === "setname") {
     const name = args.join(" ");
-    if (!name) {
-      await sendText(from, "❌ Usage: .setname <name>\n📃 Requires: *Rename Sheet* (buy from .shop for $91,000)\nName must be 2–20 characters.");
-      return;
-    }
-    if (name.length < 2 || name.length > 20) {
-      await sendText(from, "❌ Name must be between 2 and 20 characters.");
-      return;
-    }
-    const inv = getInventory(userId);
+    if (!name) { await sendText(from, "❌ Usage: .setname <name>\n📃 Requires: *Rename Sheet* (buy from .shop for $91,000)\nName must be 2–20 characters."); return; }
+    if (name.length < 2 || name.length > 20) { await sendText(from, "❌ Name must be between 2 and 20 characters."); return; }
+    const inv = await getInventory(userId);
     const sheet = inv.find((i) => i.item.toLowerCase().includes("rename sheet"));
-    if (!sheet) {
-      await sendText(from, "❌ You need a *Rename Sheet* to change your name.\nBuy one from the *.shop* for $91,000.");
-      return;
-    }
-    removeFromInventory(userId, sheet.item);
-    updateUser(sender, { name });
+    if (!sheet) { await sendText(from, "❌ You need a *Rename Sheet* to change your name.\nBuy one from the *.shop* for $91,000."); return; }
+    await removeFromInventory(userId, sheet.item);
+    await updateUser(sender, { name });
     await sendText(from, `✅ Name changed to: *${name}*\n📃 1 Rename Sheet consumed.`);
     return;
   }
 
   if (cmd === "setpp" || cmd === "setbg") {
     const media = await getCommandProfileMedia(ctx).catch(() => null);
-    if (!media) {
-      await sendText(from, `❌ Reply to an image/video/sticker or send media with .${cmd} as the caption.`);
-      return;
-    }
+    if (!media) { await sendText(from, `❌ Reply to an image/video/sticker or send media with .${cmd} as the caption.`); return; }
     const imageKey = cmd === "setpp" ? "profile_picture" : "profile_background";
     const videoKey = cmd === "setpp" ? "profile_picture_video" : "profile_background_video";
     const label = cmd === "setpp" ? "picture" : "background";
     if (media.type === "video") {
-      if (!canSetProfileVideo(ctx, user)) {
-        await sendText(from, "❌ Only owner, guardians, mods, group mods, and active premium users can set video profile media.");
-        return;
-      }
+      if (!canSetProfileVideo(ctx, user)) { await sendText(from, "❌ Only owner, guardians, mods, group mods, and active premium users can set video profile media."); return; }
       const poster = await getVideoPoster(media.buffer).catch(() => null);
       const resizedPoster = poster
-        ? await sharp(poster)
-          .resize(cmd === "setpp" ? 640 : 765, cmd === "setpp" ? 640 : 850, { fit: "cover" })
-          .jpeg({ quality: 92 })
-          .toBuffer()
+        ? await sharp(poster).resize(cmd === "setpp" ? 640 : 765, cmd === "setpp" ? 640 : 850, { fit: "cover" }).jpeg({ quality: 92 }).toBuffer()
         : null;
-      updateUser(sender, { [videoKey]: media.buffer, [imageKey]: resizedPoster });
+      await updateUser(sender, { [videoKey]: media.buffer.toString("base64"), [imageKey]: resizedPoster?.toString("base64") });
       await sendText(from, `✅ Your animated profile ${label} has been updated.`);
       return;
     }
-    const resized = await sharp(media.buffer)
-      .resize(cmd === "setpp" ? 640 : 765, cmd === "setpp" ? 640 : 850, { fit: "cover" })
-      .jpeg({ quality: 92 })
-      .toBuffer();
-    updateUser(sender, { [imageKey]: resized, [videoKey]: null });
+    const resized = await sharp(media.buffer).resize(cmd === "setpp" ? 640 : 765, cmd === "setpp" ? 640 : 850, { fit: "cover" }).jpeg({ quality: 92 }).toBuffer();
+    await updateUser(sender, { [imageKey]: resized.toString("base64"), [videoKey]: null });
     await sendText(from, `✅ Your profile ${label} has been updated.`);
     return;
   }
@@ -419,21 +363,22 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
   if (cmd === "profile" || cmd === "p") {
     const info = ctx.msg.message?.extendedTextMessage?.contextInfo;
     const rawTargetId = resolvedMentions[0] || info?.participant || sender;
-    // Resolve @lid to real @s.whatsapp.net using the shared helper (prefers cached groupMeta)
     const targetId = resolveMentionedJid(rawTargetId, groupMeta);
-    const target = ensureUser(targetId);
-    const rpg = ensureRpg(targetId);
-    const rank = getUserRank(targetId);
-    const guild = getUserGuild(targetId);
-    const role = getProfileRole(targetId);
+    const target = await ensureUser(targetId);
+    const rpg = await ensureRpg(targetId);
+    const rank = await getUserRank(targetId);
+    const guild = await getUserGuild(targetId);
+    const role = await getProfileRole(targetId, target);
     const name = target.name && target.name !== targetId.split("@")[0]
       ? target.name
-      : getMentionName(targetId);
+      : await getMentionName(targetId);
     const age = target.age || "Not set";
     const bio = target.bio || "No bio set";
-    const registered = formatProfileDate(Number(target.registered_at || target.created_at || now));
-    const daysSinceReg = Math.floor((now - Number(target.registered_at || target.created_at || now)) / 86400);
-    const hasVideoProfile = Buffer.isBuffer(target.profile_picture_video) || Buffer.isBuffer(target.profile_background_video);
+    const regTimestamp = Number(target.registered_at || 0) || Number(target.created_at || 0);
+    const regDate = regTimestamp
+      ? new Date(regTimestamp * 1000).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })
+      : "Unknown";
+    const hasVideoProfile = !!(target.profile_picture_video || target.profile_background_video);
     const animatedProfile = hasVideoProfile
       ? await buildAnimatedProfileGif(ctx, targetId, target, rpg, rank, role).catch(async () => null)
       : null;
@@ -441,13 +386,6 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
       ? null
       : await buildProfileImage(ctx, targetId, target, rpg, rank, role).catch(async () => null);
 
-    const regTimestamp = Number(target.registered_at || 0) || Number(target.created_at || 0);
-    const regDate = regTimestamp
-      ? new Date(regTimestamp * 1000).toLocaleDateString("en-GB", {
-          day: "2-digit", month: "short", year: "numeric",
-        })
-      : "Unknown";
-    const gymBadges = (target as any).gym_badges || "None";
     const text =
       `╭━━━★彡 ℙℝ𝕆𝔽𝕀𝕃𝔼 彡★━━━╮\n` +
       `│      ☁️ Welcome to Requiem Order ☁️\n` +
@@ -457,9 +395,9 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
       `ꕥ 𝗕𝗶𝗼: ${bio}\n` +
       `ꕥ 𝗥𝗲𝗴𝗶𝘀𝘁𝗲𝗿𝗲𝗱: ${regDate}\n` +
       `ꕥ 𝗥𝗼𝗹𝗲: ${role}\n` +
-      `ꕥ 𝗚𝘂𝗶𝗹𝗱: ${guild?.name || "N/A"}\n` +
+      `ꕥ 𝗚𝘂𝗶𝗹𝗱: ${(guild as any)?.name || "N/A"}\n` +
       `ꕥ 𝗗𝘂𝗻𝗴𝗲𝗼𝗻: Floor ${rpg.dungeon_floor} · Lv.${rpg.level}\n` +
-      `ꕥ 𝗕𝗮𝗻𝗻𝗲𝗱: ${isBanned("user", targetId) ? "Yes" : "No"}\n` +
+      `ꕥ 𝗕𝗮𝗻𝗻𝗲𝗱: ${await isBanned("user", targetId) ? "Yes" : "No"}\n` +
       `╰━━━━━━━━━━━━━━━━━━━━╯\n` +
       `☁️ Rise Beyond the Clouds ☁️`;
 
@@ -474,82 +412,88 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
   }
 
   if (cmd === "frame") {
-    if (!args[0]) {
-      const frames = getAllFrames();
-      if (frames.length === 0) {
-        await sendText(from, "❌ No frames available yet.");
-        return;
+    if (args[0] === "delete" || args[0] === "remove") {
+      const staffRow = await getStaff(sender);
+      const isStaffMember = ctx.isOwner || !!staffRow;
+      if (!isStaffMember) { await sendText(from, "❌ Only staff can delete frames."); return; }
+      const target = args[1];
+      if (!target) { await sendText(from, "❌ Usage: .frame delete <code or number>"); return; }
+      const frame = await getFrameById(target);
+      if (!frame) { await sendText(from, `❌ Frame not found.`); return; }
+      const PROTECTED_BRAND_FRAMES = new Set(["Celestial Sky", "Cherry Blossom", "Samurai Gold", "Neon Pulse", "Dragon Fire"]);
+      if ((frame as any).uploaded_by === "system" && PROTECTED_BRAND_FRAMES.has((frame as any).name)) {
+        await sendText(from, "❌ Can't delete a built-in default frame."); return;
       }
-      const target = ensureUser(sender);
+      await col("frames").deleteOne({ _id: (frame as any)._id });
+      const frameCode = (frame as any).code || (frame as any)._id?.toString();
+      const frameOidStr = (frame as any)._id?.toString();
+      await col("users").updateMany(
+        { frame_id: { $in: [frameCode, frameOidStr].filter(Boolean) } },
+        { $set: { frame_id: null } }
+      ).catch(() => {});
+      await sendText(from, `✅ Frame *${(frame as any).name}* deleted.`);
+      return;
+    }
+
+    if (!args[0] || /^\d+$/.test(args[0])) {
+      const frames = await getAllFrames();
+      if ((frames as any[]).length === 0) { await sendText(from, "❌ No frames available yet."); return; }
+      const PER_PAGE = 15;
+      const pageNum = args[0] ? Math.max(1, parseInt(args[0], 10) || 1) : 1;
+      const totalPages = Math.ceil((frames as any[]).length / PER_PAGE);
+      const pageFrames = (frames as any[]).slice((pageNum - 1) * PER_PAGE, pageNum * PER_PAGE);
+      const target = await ensureUser(sender);
       const equippedId = (target as any).frame_id;
-      const list = frames.map((f: any) => {
-        const tag = f.id === equippedId ? " ✅" : "";
-        return `${f.id}. *${f.name}*${tag} [${f.theme}]`;
+      const list = pageFrames.map((f: any, idx: number) => {
+        const seqNum = (pageNum - 1) * PER_PAGE + idx + 1;
+        const code = f.code || f._id?.toString() || f.id;
+        const oid = f._id?.toString() || f.id;
+        const tag = (equippedId && (equippedId === code || equippedId === oid)) ? " ✅" : "";
+        return `${seqNum}. *${f.name}*${tag} [${f.theme}] — \`${code}\``;
       }).join("\n");
-      await sendText(from, `🖼️ *Available Frames*\n\n${list}\n\nUse *.frame <id>* to equip a frame.\nUse *.frame 0* to remove your frame.`);
+      await sendText(
+        from,
+        `🖼️ *Available Frames* (page ${pageNum}/${totalPages}, ${(frames as any[]).length} total)\n\n${list}\n\n` +
+        `Use *.frame <number or code>* to equip a frame.\nUse *.frame 0* to remove your frame.\nUse *.frame <page>* to see more (e.g. *.frame 2*).`
+      );
       return;
     }
-    const frameId = parseInt(args[0], 10);
-    if (isNaN(frameId)) {
-      await sendText(from, "❌ Usage: .frame <id> — Use .frame with no args to see the list.");
-      return;
-    }
-    if (frameId === 0) {
-      equipFrame(sender, null);
-      await sendText(from, "✅ Frame removed.");
-      return;
-    }
-    const frame = getFrameById(frameId);
-    if (!frame) {
-      await sendText(from, `❌ Frame #${frameId} not found. Use *.frame* to see the list.`);
-      return;
-    }
-    equipFrame(sender, frameId);
-    await sendText(from, `✅ Frame *${frame.name}* equipped! Your profile card now uses this frame.`);
+    const frameArg = args[0];
+    if (frameArg === "0") { await equipFrame(sender, null); await sendText(from, "✅ Frame removed."); return; }
+    const frame = await getFrameById(frameArg);
+    if (!frame) { await sendText(from, `❌ Frame not found. Use *.frame* to see the list.`); return; }
+    const frameCode = (frame as any).code || (frame as any)._id?.toString() || (frame as any).id;
+    await equipFrame(sender, frameCode);
+    await sendText(from, `✅ Frame *${(frame as any).name}* equipped! Your profile card now uses this frame.`);
     return;
   }
 
   if (cmd === "bio") {
     const bio = args.join(" ");
     if (!bio) { await sendText(from, "❌ Usage: .bio [your bio]"); return; }
-    updateUser(sender, { bio });
+    await updateUser(sender, { bio });
     await sendText(from, `✅ Bio updated: ${bio}`);
     return;
   }
 
   if (cmd === "setage") {
     const age = args[0];
-    if (!age || !/^\d+$/.test(age)) {
-      await sendText(from, "❌ Usage: .setage [age] — only numbers are allowed.");
-      return;
-    }
+    if (!age || !/^\d+$/.test(age)) { await sendText(from, "❌ Usage: .setage [age] — only numbers are allowed."); return; }
     const ageNum = parseInt(age, 10);
-    if (ageNum < 13 || ageNum > 60) {
-      await sendText(from, "❌ Age must be between 13 and 60.");
-      return;
-    }
-    updateUser(sender, { age });
+    if (ageNum < 13 || ageNum > 60) { await sendText(from, "❌ Age must be between 13 and 60."); return; }
+    await updateUser(sender, { age });
     await sendText(from, `✅ Age set to: ${age}`);
     return;
   }
 
   if (cmd === "inventory" || cmd === "inv") {
     const ITEM_EMOJIS: Record<string, string> = {
-      "Health Potion": "🧪",
-      "Elixir": "⚗️",
-      "Sword": "⚔️",
-      "Shield": "🛡️",
-      "Speed Boots": "👟",
-      "Lucky Charm": "🍀",
-      "Dungeon Key": "🗝️",
-      "Guild License": "📜",
+      "Health Potion": "🧪", "Elixir": "⚗️", "Sword": "⚔️", "Shield": "🛡️",
+      "Speed Boots": "👟", "Lucky Charm": "🍀", "Dungeon Key": "🗝️", "Guild License": "📜",
     };
-    const inv = getInventory(userId);
-    if (inv.length === 0) {
-      await sendText(from, "🎒 Your inventory is empty.");
-      return;
-    }
-    const text = `🎒 *Inventory — @${getMentionName(sender)}*\n\n` +
+    const inv = await getInventory(userId);
+    if (inv.length === 0) { await sendText(from, "🎒 Your inventory is empty."); return; }
+    const text = `🎒 *Inventory — ${mentionTag(sender)}*\n\n` +
       inv.map((i) => `${ITEM_EMOJIS[i.item] || "📦"} *${i.item}* x${i.quantity}`).join("\n");
     await sendText(from, text);
     return;
@@ -557,38 +501,28 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
 
   if (cmd === "shop") {
     const ITEM_EMOJIS: Record<string, string> = {
-      "Health Potion": "🧪",
-      "Elixir": "⚗️",
-      "Sword": "⚔️",
-      "Shield": "🛡️",
-      "Speed Boots": "👟",
-      "Lucky Charm": "🍀",
-      "Dungeon Key": "🗝️",
+      "Health Potion": "🧪", "Elixir": "⚗️", "Sword": "⚔️", "Shield": "🛡️", "Speed Boots": "👟", "Lucky Charm": "🍀", "Dungeon Key": "🗝️",
+      "Bank Note": "📄", "Rename Sheet": "📝", "Pistol": "🔫", "Lottery Ticket": "🎫", "Health Pack": "❤️‍🩹",
     };
-    const CAT_EMOJIS: Record<string, string> = {
-      rpg: "⚔️",
-      general: "🛍️",
-      premium: "👑",
-      cards: "🎴",
-    };
-    const items = getShop();
+    const CAT_EMOJIS: Record<string, string> = { rpg: "⚔️", general: "🛍️", premium: "👑", cards: "🎴" };
+    const items = await getShop();
     const seen = new Set<string>();
     const categories: Record<string, any[]> = {};
     for (const item of items) {
-      if (seen.has(item.name)) continue;
-      seen.add(item.name);
-      if (!categories[item.category]) categories[item.category] = [];
-      categories[item.category].push(item);
+      if (seen.has((item as any).name)) continue;
+      seen.add((item as any).name);
+      const cat = (item as any).category;
+      if (!categories[cat]) categories[cat] = [];
+      categories[cat].push(item);
     }
     let text = "┌─⟡ 『 🏪 𝗦𝗛𝗢𝗣 』⟡\n║\n";
     for (const [cat, catItems] of Object.entries(categories)) {
       const catEmoji = CAT_EMOJIS[cat] || "📦";
-      text += `╠─⟡ ${catEmoji} *${cat.toUpperCase()}*\n`;
-      text += `║ ┌────────────────────\n`;
+      text += `╠─⟡ ${catEmoji} *${cat.toUpperCase()}*\n║ ┌────────────────────\n`;
       for (const item of catItems) {
-        const emoji = ITEM_EMOJIS[item.name] || "•";
-        text += `║ ║ ${emoji} *${item.name}* — $${formatNumber(item.price)}\n`;
-        if (item.description) text += `║ ║    _${item.description}_\n`;
+        const emoji = ITEM_EMOJIS[(item as any).name] || "•";
+        text += `║ ║ ${emoji} *${(item as any).name}* — $${formatNumber((item as any).price)}\n`;
+        if ((item as any).description) text += `║ ║    _${(item as any).description}_\n`;
       }
       text += `║ └────────────────────\n║\n`;
     }
@@ -599,58 +533,78 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
 
   if (cmd === "buy") {
     const itemName = args.join(" ");
-    const item = getShopItem(itemName);
+    const item = await getShopItem(itemName);
     if (!item) { await sendText(from, "❌ Item not found. Use .shop to see available items."); return; }
-    if ((user.balance || 0) < item.price) {
-      await sendText(from, `❌ Not enough money. You need $${formatNumber(item.price)}, you have $${formatNumber(user.balance || 0)}.`);
+    if ((user.balance || 0) < (item as any).price) {
+      await sendText(from, `❌ Not enough money. You need $${formatNumber((item as any).price)}, you have $${formatNumber(user.balance || 0)}.`);
       return;
     }
-    updateUser(sender, { balance: (user.balance || 0) - item.price });
-    addToInventory(userId, item.name);
-    await sendText(from, `✅ Purchased *${item.name}* for $${formatNumber(item.price)}!`);
+    await updateUser(sender, { balance: (user.balance || 0) - (item as any).price });
+    const effect: string = (item as any).effect || "";
+    if (effect === "lottery_entry") {
+      // Directly credit lottery_tickets on user — no inventory step
+      await updateUser(userId, { lottery_tickets: ((await import("../db/queries.js").then(m => m.getUser(userId))) as any)?.lottery_tickets + 1 || 1 });
+      await sendText(from, `✅ Purchased *${(item as any).name}* for $${formatNumber((item as any).price)}!\n🎫 Lottery ticket added! Type *.lottery* to enter the draw.`);
+    } else if (effect.startsWith("bank_cap:")) {
+      // Bank capacity is calculated by getBankCapExtra() from items sitting
+      // in inventory (see above) — it sums bank_cap:<amount> effects across
+      // every Bank Note owned, multiplied by quantity. Writing to a separate
+      // user.bank_cap field here (the old behavior) had no effect on the
+      // actual deposit limit, since nothing ever read that field — this is
+      // exactly the bug where buying a Bank Note still showed "not enough
+      // bank capacity" afterward. Adding it to inventory instead makes the
+      // purchase immediately effective, and consistent with selling a note
+      // later correctly reducing capacity again.
+      await addToInventory(userId, (item as any).name);
+      const extra = parseInt(effect.split(":")[1]) || 0;
+      const newExtraCap = await getBankCapExtra(userId);
+      const BASE_CAP = 50_000;
+      await sendText(from, `✅ Purchased *${(item as any).name}* for $${formatNumber((item as any).price)}!\n📄 Bank capacity increased by $${formatNumber(extra)}. New cap: $${formatNumber(BASE_CAP + newExtraCap)}`);
+    } else {
+      await addToInventory(userId, (item as any).name);
+      await sendText(from, `✅ Purchased *${(item as any).name}* for $${formatNumber((item as any).price)}!\n_Use *.inventory* to view your items._`);
+    }
     return;
   }
 
   if (cmd === "sell") {
     const itemName = args.join(" ");
-    const inv = getInventory(userId);
+    const inv = await getInventory(userId);
     const invEntry = inv.find((i) => i.item.toLowerCase() === itemName.toLowerCase());
     if (!invEntry) { await sendText(from, "❌ You don't have that item."); return; }
-    const removed = removeFromInventory(userId, invEntry.item);
+    const removed = await removeFromInventory(userId, invEntry.item);
     if (!removed) { await sendText(from, "❌ Could not remove item."); return; }
-    const item = getShopItem(invEntry.item);
-    const sellPrice = Math.floor((item?.price || 100) * 0.5);
-    updateUser(sender, { balance: (user.balance || 0) + sellPrice });
+    const item = await getShopItem(invEntry.item);
+    const sellPrice = Math.floor(((item as any)?.price || 100) * 0.5);
+    await updateUser(sender, { balance: (user.balance || 0) + sellPrice });
     await sendText(from, `✅ Sold *${invEntry.item}* for $${formatNumber(sellPrice)}.`);
     return;
   }
 
   if (cmd === "use") {
     const itemName = args.join(" ");
-    const inv = getInventory(userId);
+    const inv = await getInventory(userId);
     const entry = inv.find((i) => i.item.toLowerCase() === itemName.toLowerCase());
     if (!entry) { await sendText(from, "❌ You don't have that item."); return; }
-
-    const item = getShopItem(entry.item);
+    const item = await getShopItem(entry.item);
     if (!item) { await sendText(from, "❌ Unknown item effect."); return; }
-
-    if (item.effect.startsWith("heal:")) {
-      const rpg = ensureRpg(userId);
-      let heal = item.effect === "heal:full" ? rpg.max_hp : parseInt(item.effect.split(":")[1]);
+    if ((item as any).effect.startsWith("heal:")) {
+      const rpg = await ensureRpg(userId);
+      const heal = (item as any).effect === "heal:full" ? rpg.max_hp : parseInt((item as any).effect.split(":")[1]);
       const newHp = Math.min(rpg.hp + heal, rpg.max_hp);
       const { updateRpg } = await import("../db/queries.js");
-      updateRpg(sender, { hp: newHp });
-      removeFromInventory(userId, entry.item);
+      await updateRpg(sender, { hp: newHp });
+      await removeFromInventory(userId, entry.item);
       await sendText(from, `❤️ Used *${entry.item}*. HP: ${newHp}/${rpg.max_hp}`);
     } else {
-      removeFromInventory(userId, entry.item);
+      await removeFromInventory(userId, entry.item);
       await sendText(from, `✅ Used *${entry.item}*. Effect applied!`);
     }
     return;
   }
 
   if (cmd === "leaderboard" || cmd === "lb") {
-    const list = getXpLeaderboard(10);
+    const list = await getXpLeaderboard(10);
     const MEDALS = ["🥇", "🥈", "🥉"];
     let text = "╔ ❰ 🏆 Xᴘ Lᴇᴀᴅᴇʀʙᴏᴀʀᴅ ❱ ╗\n║  🌟 Tᴏᴘ Pʟᴀʏᴇʀs\n║\n";
     list.forEach((u, i) => {
@@ -671,13 +625,10 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
   if (cmd === "work") {
     const lastWork = user.last_work || 0;
     const diff = now - lastWork;
-    if (diff < WORK_COOLDOWN) {
-      await sendText(from, `⏳ Cooldown: ${formatDuration(WORK_COOLDOWN - diff)} left to work again.`);
-      return;
-    }
+    if (diff < WORK_COOLDOWN) { await sendText(from, `⏳ Cooldown: ${formatDuration(WORK_COOLDOWN - diff)} left to work again.`); return; }
     const job = WORK_JOBS[Math.floor(Math.random() * WORK_JOBS.length)];
     const earned = 200 + Math.floor(Math.random() * 300);
-    updateUser(sender, { balance: (user.balance || 0) + earned, last_work: now });
+    await updateUser(sender, { balance: (user.balance || 0) + earned, last_work: now });
     await sendText(from, `💼 ${job} and earned *$${formatNumber(earned)}*!\nWallet: $${formatNumber((user.balance || 0) + earned)}`);
     return;
   }
@@ -685,17 +636,11 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
   if (cmd === "dig") {
     const lastDig = user.last_dig || 0;
     const diff = now - lastDig;
-    if (diff < DIG_COOLDOWN) {
-      await sendText(from, `⏳ Cooldown: ${formatDuration(DIG_COOLDOWN - diff)} left to dig again.`);
-      return;
-    }
+    if (diff < DIG_COOLDOWN) { await sendText(from, `⏳ Cooldown: ${formatDuration(DIG_COOLDOWN - diff)} left to dig again.`); return; }
     const find = DIG_FINDS[Math.floor(Math.random() * DIG_FINDS.length)];
     const value = randomDigFishReward();
-    updateUser(sender, {
-      balance: (user.balance || 0) + value,
-      last_dig: now,
-    });
-    addToInventory(userId, find.item);
+    await updateUser(sender, { balance: (user.balance || 0) + value, last_dig: now });
+    await addToInventory(userId, find.item);
     await sendText(from, `⛏️ You dug and found: *${find.item}*!\n+$${formatNumber(value)}`);
     return;
   }
@@ -703,17 +648,11 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
   if (cmd === "fish") {
     const lastFish = user.last_fish || 0;
     const diff = now - lastFish;
-    if (diff < FISH_COOLDOWN) {
-      await sendText(from, `⏳ Cooldown: ${formatDuration(FISH_COOLDOWN - diff)} left to fish again.`);
-      return;
-    }
+    if (diff < FISH_COOLDOWN) { await sendText(from, `⏳ Cooldown: ${formatDuration(FISH_COOLDOWN - diff)} left to fish again.`); return; }
     const catch_ = FISH_CATCHES[Math.floor(Math.random() * FISH_CATCHES.length)];
     const value = randomDigFishReward();
-    updateUser(sender, {
-      balance: (user.balance || 0) + value,
-      last_fish: now,
-    });
-    addToInventory(userId, catch_.item);
+    await updateUser(sender, { balance: (user.balance || 0) + value, last_fish: now });
+    await addToInventory(userId, catch_.item);
     await sendText(from, `🎣 You fished and caught: *${catch_.item}*!\n+$${formatNumber(value)}`);
     return;
   }
@@ -721,13 +660,10 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
   if (cmd === "beg") {
     const lastBeg = user.last_beg || 0;
     const diff = now - lastBeg;
-    if (diff < BEG_COOLDOWN) {
-      await sendText(from, `⏳ Cooldown: ${formatDuration(BEG_COOLDOWN - diff)} left.`);
-      return;
-    }
+    if (diff < BEG_COOLDOWN) { await sendText(from, `⏳ Cooldown: ${formatDuration(BEG_COOLDOWN - diff)} left.`); return; }
     const response = BEG_RESPONSES[Math.floor(Math.random() * BEG_RESPONSES.length)];
     const earned = 10 + Math.floor(Math.random() * 90);
-    updateUser(sender, { balance: (user.balance || 0) + earned, last_beg: now });
+    await updateUser(sender, { balance: (user.balance || 0) + earned, last_beg: now });
     await sendText(from, `🙏 ${response}\nYou received *$${formatNumber(earned)}*.`);
     return;
   }
@@ -735,60 +671,31 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
   if (cmd === "steal") {
     const info = ctx.msg.message?.extendedTextMessage?.contextInfo;
     const rawTarget = ctx.resolvedMentions[0] || info?.participant;
-    if (!rawTarget) {
-      await sendText(from, "❌ Usage: .steal @user or reply to their message with .steal");
-      return;
-    }
+    if (!rawTarget) { await sendText(from, "❌ Usage: .steal @user or reply to their message with .steal"); return; }
     const targetId = rawTarget;
-    if (targetId === sender) {
-      await sendText(from, "❌ You can't steal from yourself.");
-      return;
-    }
-    if (isBot(targetId)) {
-      await sendText(from, "❌ Bots are not part of the economy system.");
-      return;
-    }
-    const inv = getInventory(userId);
+    if (targetId === sender) { await sendText(from, "❌ You can't steal from yourself."); return; }
+    if (await isBot(targetId)) { await sendText(from, "❌ Bots are not part of the economy system."); return; }
+    const inv = await getInventory(userId);
     const pistol = inv.find((i) => i.item.toLowerCase() === "pistol");
-    if (!pistol) {
-      await sendText(from, "❌ You need a *Pistol* to steal.\nBuy one from the *.shop* for $15,000.");
-      return;
-    }
+    if (!pistol) { await sendText(from, "❌ You need a *Pistol* to steal.\nBuy one from the *.shop* for $15,000."); return; }
     const lastSteal = user.last_steal || 0;
-    const diff = now - lastSteal;
-    if (diff < STEAL_COOLDOWN) {
-      await sendText(from, `⏳ Steal cooldown: ${formatDuration(STEAL_COOLDOWN - diff)} left.`);
-      return;
-    }
-    const target = ensureUser(targetId);
+    if (now - lastSteal < STEAL_COOLDOWN) { await sendText(from, `⏳ Steal cooldown: ${formatDuration(STEAL_COOLDOWN - (now - lastSteal))} left.`); return; }
+    const target = await ensureUser(targetId);
     const targetBal = target.balance || 0;
-    if (targetBal <= 0) {
-      await sendText(from, `❌ @${getMentionName(targetId)} has nothing to steal!`, [targetId]);
-      return;
-    }
-    updateUser(sender, { last_steal: now });
+    if (targetBal <= 0) { await sendText(from, `❌ ${mentionTag(targetId)} has nothing to steal!`, [targetId]); return; }
+    await updateUser(sender, { last_steal: now });
     const success = Math.random() < 0.5;
     if (success) {
       const pct = 0.1 + Math.random() * 0.2;
       const stolen = Math.max(1, Math.floor(targetBal * pct));
-      updateUser(sender, { balance: (user.balance || 0) + stolen });
-      updateUser(targetId, { balance: Math.max(0, targetBal - stolen) });
-      await sendText(from,
-        `🔫 *Heist Successful!*\n\n` +
-        `You robbed @${getMentionName(targetId)} and got away with *$${formatNumber(stolen)}*!\n` +
-        `Your new balance: $${formatNumber((user.balance || 0) + stolen)}`,
-        [targetId]
-      );
+      await updateUser(sender, { balance: (user.balance || 0) + stolen });
+      await updateUser(targetId, { balance: Math.max(0, targetBal - stolen) });
+      await sendText(from, `🔫 *Heist Successful!*\n\nYou robbed ${mentionTag(targetId)} and got away with *$${formatNumber(stolen)}*!\nYour new balance: $${formatNumber((user.balance || 0) + stolen)}`, [targetId]);
     } else {
       const pct = 0.05 + Math.random() * 0.1;
       const lost = Math.max(1, Math.floor((user.balance || 0) * pct));
-      updateUser(sender, { balance: Math.max(0, (user.balance || 0) - lost) });
-      await sendText(from,
-        `🚓 *Caught Red-Handed!*\n\n` +
-        `You failed to rob @${getMentionName(targetId)} and lost *$${formatNumber(lost)}* in the chaos.\n` +
-        `Your new balance: $${formatNumber(Math.max(0, (user.balance || 0) - lost))}`,
-        [targetId]
-      );
+      await updateUser(sender, { balance: Math.max(0, (user.balance || 0) - lost) });
+      await sendText(from, `🚓 *Caught Red-Handed!*\n\nYou failed to rob ${mentionTag(targetId)} and lost *$${formatNumber(lost)}* in the chaos.\nYour new balance: $${formatNumber(Math.max(0, (user.balance || 0) - lost))}`, [targetId]);
     }
     return;
   }
@@ -802,48 +709,26 @@ export async function handleEconomy(ctx: CommandContext): Promise<void> {
       "You have the personality of a wet napkin.",
       "I'd roast you harder, but my mom says I can't burn trash.",
     ];
-    const target = mentioned ? `@${getMentionName(mentioned)}` : "you";
-    await ctx.sock.sendMessage(from, {
-      text: `🔥 ${target}: ${roasts[Math.floor(Math.random() * roasts.length)]}`,
-      mentions: mentioned ? [mentioned] : [],
-    });
+    const target = mentioned ? `${mentionTag(mentioned)}` : "you";
+    await ctx.sock.sendMessage(from, { text: `🔥 ${target}: ${roasts[Math.floor(Math.random() * roasts.length)]}`, mentions: mentioned ? [mentioned] : [] });
     return;
   }
 
   if (cmd === "stats") {
-    const inv = getInventory(userId);
-    const rpg = ensureRpg(userId);
+    const inv = await getInventory(userId);
+    const rpg = await ensureRpg(userId);
     const level = Number(user.level || 1);
     const xp = Number(user.xp || 0);
     const xpNeeded = level * 100;
     const total = Number(user.balance || 0) + Number(user.bank || 0);
-    const rank = getUserRank(userId);
-    const guild = getUserGuild(userId);
+    const rank = await getUserRank(userId);
+    const guild = await getUserGuild(userId);
     await sendText(from,
-      `╔ ❰ 📊 Sᴛᴀᴛs Pᴀɴᴇʟ ❱ ╗\n` +
-      `║  👤 @${getMentionName(sender)}\n` +
-      `║\n` +
-      `╠═ ❰ Eᴄᴏɴᴏᴍʏ ❱\n` +
-      `║ 💰 Wᴀʟʟᴇᴛ: $${formatNumber(user.balance || 0)}\n` +
-      `║ 🏦 Bᴀɴᴋ: $${formatNumber(user.bank || 0)}\n` +
-      `║ 💸 Tᴏᴛᴀʟ: $${formatNumber(total)}\n` +
-      `║ 💎 Gᴇᴍs: ${formatNumber(user.gems || 0)}\n` +
-      `║\n` +
-      `╠═ ❰ Pʀᴏɢʀᴇss ❱\n` +
-      `║ ⭐ Lᴠ: ${level}  ·  Rᴀɴᴋ #${rank}\n` +
-      `║ ✨ XP: ${formatNumber(xp)} / ${formatNumber(xpNeeded)}\n` +
-      `║ 🌌 Tᴏᴛᴀʟ XP: ${formatNumber(getTotalXpScore(level, xp))}\n` +
-      `║\n` +
-      `╠═ ❰ Rᴘɢ ❱\n` +
-      `║ ⚔️ Aᴛᴋ: ${rpg?.attack || 20}  🛡️ Dᴇғ: ${rpg?.defense || 10}\n` +
-      `║ 💨 Sᴘᴅ: ${rpg?.speed || 15}  ❤️ HP: ${rpg?.hp || 100}/${rpg?.max_hp || 100}\n` +
-      `║ 🧬 Cʟᴀss: ${rpg?.class || "Warrior"}\n` +
-      `║ 🏰 Gᴜɪʟᴅ: ${guild?.name || "None"}\n` +
-      `║\n` +
-      `╠═ ❰ Iɴᴠᴇɴᴛᴏʀʏ ❱\n` +
-      `║ 🎒 Iᴛᴇᴍ Tʏᴘᴇs: ${inv.length}\n` +
-      `║ 🧾 Rᴇɢɪsᴛᴇʀᴇᴅ: ${user.registered ? "Yᴇs" : "Nᴏ"}\n` +
-      `╚══════════════════╝`,
+      `╔ ❰ 📊 Sᴛᴀᴛs Pᴀɴᴇʟ ❱ ╗\n║  👤 ${mentionTag(sender)}\n║\n` +
+      `╠═ ❰ Eᴄᴏɴᴏᴍʏ ❱\n║ 💰 Wᴀʟʟᴇᴛ: $${formatNumber(user.balance || 0)}\n║ 🏦 Bᴀɴᴋ: $${formatNumber(user.bank || 0)}\n║ 💸 Tᴏᴛᴀʟ: $${formatNumber(total)}\n║ 💎 Gᴇᴍs: ${formatNumber(user.gems || 0)}\n║\n` +
+      `╠═ ❰ Pʀᴏɢʀᴇss ❱\n║ ⭐ Lᴠ: ${level}  ·  Rᴀɴᴋ #${rank}\n║ ✨ XP: ${formatNumber(xp)} / ${formatNumber(xpNeeded)}\n║ 🌌 Tᴏᴛᴀʟ XP: ${formatNumber(getTotalXpScore(level, xp))}\n║\n` +
+      `╠═ ❰ Rᴘɢ ❱\n║ ⚔️ Aᴛᴋ: ${rpg?.attack || 20}  🛡️ Dᴇғ: ${rpg?.defense || 10}\n║ 💨 Sᴘᴅ: ${rpg?.speed || 15}  ❤️ HP: ${rpg?.hp || 100}/${rpg?.max_hp || 100}\n║ 🧬 Cʟᴀss: ${rpg?.class || "Warrior"}\n║ 🏰 Gᴜɪʟᴅ: ${(guild as any)?.name || "None"}\n║\n` +
+      `╠═ ❰ Iɴᴠᴇɴᴛᴏʀʏ ❱\n║ 🎒 Iᴛᴇᴍ Tʏᴘᴇs: ${inv.length}\n║ 🧾 Rᴇɢɪsᴛᴇʀᴇᴅ: ${user.registered ? "Yᴇs" : "Nᴏ"}\n╚══════════════════╝`,
       [sender]
     );
     return;
@@ -881,127 +766,209 @@ function getTotalXpScore(level: number, xp: number): number {
   return total;
 }
 
-function getProfileRole(userId: string): string {
+async function getProfileRole(userId: string, user?: any): Promise<string> {
   const phone = userId.split("@")[0].split(":")[0];
   if (phone === BOT_OWNER_LID || userId === `${BOT_OWNER_LID}@s.whatsapp.net` || userId === `${BOT_OWNER_LID}@lid`) {
     return "Owner";
   }
-  const staff = getStaff(userId);
-  if (staff?.role === "owner") return "Owner";
-  if (staff?.role === "guardian") return "Guardian";
-  if (staff?.role === "mod") return "Mod";
-  return "Ascendant";
+  const staff = await getStaff(userId);
+  if ((staff as any)?.role === "owner") return "Owner";
+  if ((staff as any)?.role === "guardian") return "Guardian";
+  if ((staff as any)?.role === "mod") return "Mod";
+
+  // Below this point the role reflects the player's actual account standing,
+  // not just staff permissions — this is what shows on the profile card for
+  // everyone who isn't bot/group staff.
+  const u = user || (await ensureUser(userId).catch(() => null));
+  if (u) {
+    const premiumActive = !!u.premium && (!u.premium_expiry || Number(u.premium_expiry) === 0 || Number(u.premium_expiry) > Math.floor(Date.now() / 1000));
+    if (premiumActive) return "Premium User";
+
+    const regTimestamp = Number(u.registered_at || 0) || Number(u.created_at || 0);
+    const accountAgeDays = regTimestamp ? (Date.now() / 1000 - regTimestamp) / 86400 : 0;
+    const level = Number(u.level || 0);
+
+    // Brand-new accounts (first week, still low level) are Recruits.
+    if (regTimestamp && accountAgeDays < 7 && level < 5) return "Recruit";
+
+    // Established, higher-level players earn the Ascendant title.
+    if (level >= 15) return "Ascendant";
+  }
+
+  return "User";
 }
 
-function canSetProfileVideo(ctx: CommandContext, user: any): boolean {
+async function canSetProfileVideo(ctx: CommandContext, user: any): Promise<boolean> {
   if (ctx.isOwner) return true;
-  const staff = getStaff(ctx.sender);
-  if (staff?.role === "guardian" || staff?.role === "mod") return true;
-  if (ctx.from.endsWith("@g.us") && isMod(ctx.sender, ctx.from)) return true;
+  const staff = await getStaff(ctx.sender);
+  if ((staff as any)?.role === "guardian" || (staff as any)?.role === "mod") return true;
+  if (ctx.from.endsWith("@g.us") && await isMod(ctx.sender, ctx.from)) return true;
   if (!user?.premium) return false;
   const expiry = Number(user.premium_expiry || 0);
   return expiry === 0 || expiry > Math.floor(Date.now() / 1000);
 }
 
-function formatProfileDate(timestamp: number): string {
-  return new Date(timestamp * 1000).toLocaleString("en-US", {
-    month: "long",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
+function profileWrapText(text: string, maxChars: number): string[] {
+  if (!text) return [];
+  const words = text.split(/\s+/);
+  const lines: string[] = [];
+  let line = "";
+  for (const word of words) {
+    const candidate = line ? `${line} ${word}` : word;
+    if (candidate.length > maxChars) {
+      if (line) lines.push(line);
+      line = word.length > maxChars ? word.slice(0, maxChars) : word;
+    } else {
+      line = candidate;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function escapeXml(s: string): string {
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&apos;");
+}
+
+function toBuffer(data: any): Buffer | null {
+  if (!data) return null;
+  if (Buffer.isBuffer(data)) return data;
+  if (typeof data === "string") return Buffer.from(data, "base64");
+  return null;
 }
 
 async function buildProfileImage(ctx: CommandContext, targetId: string, user: any, rpg: any, rank: number, role: string): Promise<Buffer> {
   const defaultBgPath = path.resolve(new URL(import.meta.url).pathname, "../../assets/default_bg.jpg");
-  const width = 765;
-  const height = 850;
-  const level = Math.max(1, Number(user.level || 1));
-  const xp = Math.max(0, Number(user.xp || 0));
-  const xpNeeded = level * 100;
-  const progress = Math.max(0, Math.min(1, xp / xpNeeded));
-  const name = String(user.name || targetId.split("@")[0]).slice(0, 28);
-  const subtitle = `${role} ~ ${rpg?.class || "Warrior"}`;
-  const bio = String(user.bio || "").slice(0, 44);
-  const avatar = await getProfileAvatar(ctx, targetId, user);
-  const avatarSize = 190;
-  const avatarMask = Buffer.from(`<svg width="${avatarSize}" height="${avatarSize}"><circle cx="${avatarSize / 2}" cy="${avatarSize / 2}" r="${avatarSize / 2}" fill="#fff"/></svg>`);
+  const W = 800;
+  const H = 800;
+
+  const level   = Math.max(1, Number(user.level || 1));
+  const xp      = Math.max(0, Number(user.xp || 0));
+  const xpNeed  = level * 100;
+  const progress= Math.max(0, Math.min(1, xp / xpNeed));
+  const name    = String(user.name || targetId.split("@")[0]).slice(0, 26);
+  const subtitle= `${role} ~ ${rpg?.class || "Warrior"}`;
+  const rawBio  = String(user.bio || "").trim();
+  const wallet  = formatNumber(Math.max(0, Number(user.balance || 0)));
+  const bank    = formatNumber(Math.max(0, Number(user.bank    || 0)));
+  const bioLines = profileWrapText(rawBio, 38).slice(0, 3);
+
+  const avatar     = await getProfileAvatar(ctx, targetId, user);
+  const AV_SIZE    = 168;
+  const AV_CX     = 400;
+  const AV_CY     = 256;
+  const AV_LEFT   = AV_CX - AV_SIZE / 2;
+  const AV_TOP    = AV_CY - AV_SIZE / 2;
+  const avatarMask = Buffer.from(`<svg width="${AV_SIZE}" height="${AV_SIZE}"><circle cx="${AV_SIZE/2}" cy="${AV_SIZE/2}" r="${AV_SIZE/2}" fill="#fff"/></svg>`);
   const circularAvatar = await sharp(avatar)
-    .resize(avatarSize, avatarSize, { fit: "cover" })
+    .resize(AV_SIZE, AV_SIZE, { fit: "cover" })
     .composite([{ input: avatarMask, blend: "dest-in" }])
     .png()
     .toBuffer();
-  const progressWidth = 342;
-  const progressFill = Math.round(progressWidth * progress);
-  const overlay = Buffer.from(`
-    <svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
-      <style>
-        text { font-family: Arial, Helvetica, sans-serif; fill: white; }
-        .shadow { paint-order: stroke; stroke: rgba(0,0,0,.72); stroke-width: 5px; stroke-linejoin: round; }
-      </style>
-      <rect x="0" y="0" width="${width}" height="${height}" fill="rgba(0,0,0,.38)"/>
-      <circle cx="382" cy="246" r="101" fill="none" stroke="rgba(255,255,255,.5)" stroke-width="4"/>
-      <rect x="185" y="365" width="395" height="200" rx="28" fill="rgba(0,0,0,.45)"/>
-      <text x="382" y="407" text-anchor="middle" font-size="34" font-weight="800" class="shadow">${escapeXml(name)}</text>
-      <text x="382" y="448" text-anchor="middle" font-size="26" font-style="normal" class="shadow">${escapeXml(subtitle)}</text>
-      <text x="382" y="490" text-anchor="middle" font-size="24" class="shadow">Rank #${rank}   Level ${level}</text>
-      <rect x="211" y="512" width="${progressWidth}" height="24" rx="12" fill="#444" stroke="rgba(0,0,0,.85)" stroke-width="2"/>
-      <rect x="211" y="512" width="${progressFill}" height="24" rx="12" fill="#7252ff"/>
-      <text x="382" y="530" text-anchor="middle" font-size="15" font-weight="700" class="shadow">${xp}/${xpNeeded} XP</text>
-      ${bio ? `<text x="382" y="582" text-anchor="middle" font-size="20" class="shadow">${escapeXml(bio)}</text>` : ""}
-      <text x="382" y="826" text-anchor="middle" font-size="28" font-weight="800" font-style="italic" fill="rgba(255,255,255,.88)" class="shadow">REQUIEM ORDER 反逆</text>
-    </svg>
-  `);
-  const background = user.profile_background && Buffer.isBuffer(user.profile_background)
-    ? user.profile_background
-    : defaultBgPath;
 
+  // Frame gets a generous, clearly-visible margin around the avatar (44px on
+  // each side) so an equipped frame is unmistakable instead of a thin sliver.
+  const FRAME_SIZE = AV_SIZE + 88;
+  const FR_LEFT    = AV_CX - FRAME_SIZE / 2;
+  const FR_TOP     = AV_CY - FRAME_SIZE / 2;
   let frameBuffer: Buffer | null = null;
   if (user.frame_id) {
     try {
-      const db = getDb();
-      const frame = db.prepare("SELECT * FROM frames WHERE id = ?").get(user.frame_id) as any;
+      const frame = await getFrameById(user.frame_id);
       if (frame) {
-        if (frame.image && Buffer.isBuffer(frame.image) && frame.image.length > 0) {
-          frameBuffer = await sharp(frame.image).resize(220, 220).png().toBuffer();
+        const frameOid = (frame as any)._id;
+        const imgBuf = toBuffer(frame.image);
+        if (imgBuf && imgBuf.length > 0) {
+          frameBuffer = await sharp(imgBuf).resize(FRAME_SIZE, FRAME_SIZE, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } }).png().toBuffer();
         } else if (frame.svg) {
-          frameBuffer = await sharp(Buffer.from(frame.svg)).resize(220, 220).png().toBuffer();
+          frameBuffer = await sharp(Buffer.from(frame.svg)).resize(FRAME_SIZE, FRAME_SIZE, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } }).png().toBuffer();
+        } else if (frame.url) {
+          try {
+            const fr = await fetch(frame.url, { signal: AbortSignal.timeout(8000) });
+            if (fr.ok) {
+              const rawBuf = Buffer.from(await fr.arrayBuffer());
+              const pngBuf = await sharp(rawBuf).resize(FRAME_SIZE, FRAME_SIZE, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } }).png().toBuffer();
+              try { await col("frames").updateOne({ _id: frameOid }, { $set: { image: pngBuf.toString("base64") } }); } catch {}
+              frameBuffer = pngBuf;
+            }
+          } catch {}
         }
       }
     } catch {}
   }
 
-  // Composite order: avatar first → frame ring on top of avatar → text overlay on top of everything
-  const composites: Parameters<ReturnType<typeof sharp>["composite"]>[0] = [
-    { input: circularAvatar, left: 287, top: 146 },
-  ];
-  if (frameBuffer) {
-    // Frame ring sits centred on the avatar (both centred at 382, 241)
-    composites.push({ input: frameBuffer, left: 272, top: 131 });
-  }
-  // Text/stats overlay always last so it renders above the frame ring and is never obscured
+  const BAR_W     = 420;
+  const BAR_X     = AV_CX - BAR_W / 2;
+  const BAR_Y     = 500;
+  const BAR_FILL  = Math.round(BAR_W * progress);
+  const BIO_Y_START = 600;
+  const bioSvg = bioLines.length > 0
+    ? bioLines.map((line, i) =>
+        `<text x="${AV_CX}" y="${BIO_Y_START + i * 30}" text-anchor="middle" font-size="20" fill="rgba(255,255,255,.88)" class="shadow">${escapeXml(line)}</text>`
+      ).join("\n")
+    : `<text x="${AV_CX}" y="${BIO_Y_START}" text-anchor="middle" font-size="20" fill="rgba(255,255,255,.4)" class="shadow">No bio set.</text>`;
+
+  // Decorative fallback ring — only drawn when the player has NO frame equipped.
+  // Previously this ring was drawn unconditionally on every profile card,
+  // which painted over the actual equipped frame artwork underneath it.
+  const fallbackRing = !frameBuffer
+    ? `<circle cx="${AV_CX}" cy="${AV_CY}" r="${FRAME_SIZE/2}" fill="none" stroke="rgba(124,58,237,.55)" stroke-width="5" filter="url(#glow)"/>`
+    : "";
+
+  const overlay = Buffer.from(`<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="scrim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="rgba(0,0,0,.15)"/><stop offset="55%" stop-color="rgba(0,0,0,.45)"/><stop offset="100%" stop-color="rgba(0,0,0,.75)"/>
+    </linearGradient>
+    <linearGradient id="xpbar" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#7c3aed"/><stop offset="100%" stop-color="#a855f7"/>
+    </linearGradient>
+    <filter id="glow"><feGaussianBlur stdDeviation="4" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  </defs>
+  <style>text { font-family: Arial, Helvetica, sans-serif; fill: white; } .shadow { paint-order: stroke; stroke: rgba(0,0,0,.80); stroke-width: 4px; stroke-linejoin: round; } .sm { paint-order: stroke; stroke: rgba(0,0,0,.70); stroke-width: 3px; stroke-linejoin: round; }</style>
+  <rect x="0" y="0" width="${W}" height="${H}" fill="url(#scrim)"/>
+  <rect x="16" y="16" width="260" height="68" rx="14" fill="rgba(0,0,0,.55)" stroke="rgba(255,255,255,.15)" stroke-width="1.5"/>
+  <text x="36" y="44" font-size="19" font-weight="700" fill="#fbbf24" class="sm">💰 Wallet</text>
+  <text x="36" y="70" font-size="18" fill="rgba(255,255,255,.9)" class="sm">$${escapeXml(wallet)}</text>
+  <text x="164" y="44" font-size="19" font-weight="700" fill="#34d399" class="sm">🏦 Bank</text>
+  <text x="164" y="70" font-size="18" fill="rgba(255,255,255,.9)" class="sm">$${escapeXml(bank)}</text>
+  ${fallbackRing}
+  <circle cx="${AV_CX}" cy="${AV_CY}" r="${AV_SIZE/2 + 3}" fill="none" stroke="rgba(255,255,255,.25)" stroke-width="3"/>
+  <text x="${AV_CX}" y="392" text-anchor="middle" font-size="36" font-weight="800" class="shadow">${escapeXml(name)}</text>
+  <text x="${AV_CX}" y="426" text-anchor="middle" font-size="22" fill="rgba(220,220,255,.9)" class="shadow">${escapeXml(subtitle)}</text>
+  <rect x="195" y="444" width="155" height="36" rx="10" fill="rgba(124,58,237,.35)" stroke="rgba(124,58,237,.6)" stroke-width="1.5"/>
+  <text x="272" y="467" text-anchor="middle" font-size="19" font-weight="700" class="sm">Rank #${rank}</text>
+  <rect x="450" y="444" width="155" height="36" rx="10" fill="rgba(16,185,129,.28)" stroke="rgba(16,185,129,.55)" stroke-width="1.5"/>
+  <text x="527" y="467" text-anchor="middle" font-size="19" font-weight="700" class="sm">Level ${level}</text>
+  <rect x="${BAR_X}" y="${BAR_Y}" width="${BAR_W}" height="20" rx="10" fill="rgba(0,0,0,.55)" stroke="rgba(255,255,255,.12)" stroke-width="1.5"/>
+  ${BAR_FILL > 0 ? `<rect x="${BAR_X}" y="${BAR_Y}" width="${BAR_FILL}" height="20" rx="10" fill="url(#xpbar)"/>` : ""}
+  <text x="${AV_CX}" y="${BAR_Y + 15}" text-anchor="middle" font-size="13" font-weight="700" class="sm">${xp} / ${xpNeed} XP</text>
+  <rect x="60" y="582" width="680" height="${Math.max(46, bioLines.length * 30 + 22)}" rx="14" fill="rgba(0,0,0,.40)" stroke="rgba(255,255,255,.1)" stroke-width="1"/>
+  ${bioSvg}
+  <text x="${AV_CX}" y="772" text-anchor="middle" font-size="24" font-weight="800" font-style="italic" fill="rgba(255,255,255,.72)" class="shadow">REQUIEM ORDER 反逆</text>
+</svg>`);
+
+  const profileBgBuf = toBuffer(user.profile_background);
+  const background: any = profileBgBuf ?? defaultBgPath;
+
+  const composites: Parameters<ReturnType<typeof sharp>["composite"]>[0] = [];
+  if (frameBuffer) composites.push({ input: frameBuffer, left: FR_LEFT, top: FR_TOP });
+  composites.push({ input: circularAvatar, left: AV_LEFT, top: AV_TOP });
   composites.push({ input: overlay, left: 0, top: 0 });
 
-  const raw = await sharp(background)
-    .resize(width, height, { fit: "cover" })
-    .composite(composites)
-    .png()
-    .toBuffer();
-  // Final output is always 800×800 square
-  return sharp(raw)
-    .resize(800, 800, { fit: "cover" })
-    .jpeg({ quality: 92 })
-    .toBuffer();
+  return sharp(background).resize(W, H, { fit: "cover" }).composite(composites).jpeg({ quality: 92 }).toBuffer();
 }
 
 async function buildAnimatedProfileGif(ctx: CommandContext, targetId: string, user: any, rpg: any, rank: number, role: string): Promise<Buffer> {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), `profile-${randomUUID()}-`));
   try {
-    const bgFrames = Buffer.isBuffer(user.profile_background_video)
-      ? await extractVideoFrames(tmpDir, "bg", user.profile_background_video, "scale=765:850:force_original_aspect_ratio=increase,crop=765:850")
+    const bgVideoBuf = toBuffer(user.profile_background_video);
+    const avatarVideoBuf = toBuffer(user.profile_picture_video);
+    const bgFrames = bgVideoBuf
+      ? await extractVideoFrames(tmpDir, "bg", bgVideoBuf, "scale=765:850:force_original_aspect_ratio=increase,crop=765:850")
       : [];
-    const avatarFrames = Buffer.isBuffer(user.profile_picture_video)
-      ? await extractVideoFrames(tmpDir, "avatar", user.profile_picture_video, "scale=640:640:force_original_aspect_ratio=increase,crop=640:640")
+    const avatarFrames = avatarVideoBuf
+      ? await extractVideoFrames(tmpDir, "avatar", avatarVideoBuf, "scale=640:640:force_original_aspect_ratio=increase,crop=640:640")
       : [];
     const frameCount = Math.max(bgFrames.length, avatarFrames.length, 1);
     const outputPattern = path.join(tmpDir, "profile_%03d.png");
@@ -1015,15 +982,7 @@ async function buildAnimatedProfileGif(ctx: CommandContext, targetId: string, us
       await sharp(frame).png().toFile(path.join(tmpDir, `profile_${String(i + 1).padStart(3, "0")}.png`));
     }
     const outPath = path.join(tmpDir, "profile.mp4");
-    await runFfmpeg([
-      "-y",
-      "-framerate", "6",
-      "-i", outputPattern,
-      "-movflags", "+faststart",
-      "-pix_fmt", "yuv420p",
-      "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-      outPath,
-    ]);
+    await runFfmpeg(["-y","-framerate","6","-i",outputPattern,"-movflags","+faststart","-pix_fmt","yuv420p","-vf","scale=trunc(iw/2)*2:trunc(ih/2)*2",outPath]);
     return await fs.readFile(outPath);
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
@@ -1034,17 +993,9 @@ async function extractVideoFrames(tmpDir: string, prefix: string, buffer: Buffer
   const inputPath = path.join(tmpDir, `${prefix}.mp4`);
   const framePattern = path.join(tmpDir, `${prefix}_%03d.jpg`);
   await fs.writeFile(inputPath, buffer);
-  await runFfmpeg([
-    "-y",
-    "-i", inputPath,
-    "-vf", `fps=6,${vf}`,
-    "-frames:v", "18",
-    framePattern,
-  ]);
-  const entries = (await fs.readdir(tmpDir))
-    .filter((name) => name.startsWith(`${prefix}_`) && name.endsWith(".jpg"))
-    .sort();
-  return Promise.all(entries.map((name) => fs.readFile(path.join(tmpDir, name))));
+  await runFfmpeg(["-y","-i",inputPath,"-vf",`fps=6,${vf}`,"-frames:v","18",framePattern]);
+  const entries = (await fs.readdir(tmpDir)).filter((n) => n.startsWith(`${prefix}_`) && n.endsWith(".jpg")).sort();
+  return Promise.all(entries.map((n) => fs.readFile(path.join(tmpDir, n))));
 }
 
 async function getVideoPoster(buffer: Buffer): Promise<Buffer | null> {
@@ -1053,7 +1004,7 @@ async function getVideoPoster(buffer: Buffer): Promise<Buffer | null> {
     const inputPath = path.join(tmpDir, "input.mp4");
     const outputPath = path.join(tmpDir, "poster.jpg");
     await fs.writeFile(inputPath, buffer);
-    await runFfmpeg(["-y", "-i", inputPath, "-frames:v", "1", outputPath]);
+    await runFfmpeg(["-y","-i",inputPath,"-frames:v","1",outputPath]);
     return await fs.readFile(outputPath);
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
@@ -1061,11 +1012,8 @@ async function getVideoPoster(buffer: Buffer): Promise<Buffer | null> {
 }
 
 async function getProfileAvatar(ctx: CommandContext, targetId: string, user: any): Promise<Buffer> {
-  // 1. Use custom uploaded profile picture if set
-  if (user.profile_picture && Buffer.isBuffer(user.profile_picture)) {
-    return user.profile_picture;
-  }
-  // 2. Always try to fetch profile picture from WhatsApp (works for all users)
+  const ppBuf = toBuffer(user.profile_picture);
+  if (ppBuf) return ppBuf;
   try {
     const url = await (ctx.sock as any).profilePictureUrl(targetId, "image");
     if (url) {
@@ -1074,24 +1022,10 @@ async function getProfileAvatar(ctx: CommandContext, targetId: string, user: any
     }
   } catch {}
   const defaultPpPath = path.resolve(new URL(import.meta.url).pathname, "../../assets/default_pp.jpg");
-  try {
-    return await fs.readFile(defaultPpPath);
-  } catch {}
-  return sharp({
-    create: {
-      width: 300,
-      height: 300,
-      channels: 4,
-      background: "#161622",
-    },
-  })
-    .composite([{
-      input: Buffer.from(`<svg width="300" height="300" xmlns="http://www.w3.org/2000/svg"><rect width="300" height="300" fill="#151527"/><text x="150" y="176" text-anchor="middle" font-size="92" font-family="Arial" font-weight="700" fill="#ffffff">${escapeXml(targetId[0]?.toUpperCase() || "U")}</text></svg>`),
-      left: 0,
-      top: 0,
-    }])
-    .png()
-    .toBuffer();
+  try { return await fs.readFile(defaultPpPath); } catch {}
+  return sharp({ create: { width: 300, height: 300, channels: 4, background: "#161622" } })
+    .composite([{ input: Buffer.from(`<svg width="300" height="300" xmlns="http://www.w3.org/2000/svg"><rect width="300" height="300" fill="#151527"/><text x="150" y="176" text-anchor="middle" font-size="92" font-family="Arial" font-weight="700" fill="#ffffff">${escapeXml(targetId[0]?.toUpperCase() || "U")}</text></svg>`), left: 0, top: 0 }])
+    .png().toBuffer();
 }
 
 async function getCommandProfileMedia(ctx: CommandContext): Promise<{ buffer: Buffer; type: "image" | "video" } | null> {
@@ -1103,12 +1037,7 @@ async function getCommandProfileMedia(ctx: CommandContext): Promise<{ buffer: Bu
   const quoted = context?.quotedMessage;
   const quotedMedia = quoted?.imageMessage || quoted?.stickerMessage || quoted?.videoMessage || quoted?.documentMessage ? quoted : null;
   const target = directImage || directVideo || directDocument || (quotedMedia ? {
-    key: {
-      remoteJid: from,
-      fromMe: false,
-      id: context?.stanzaId || "",
-      participant: context?.participant,
-    },
+    key: { remoteJid: from, fromMe: false, id: context?.stanzaId || "", participant: context?.participant },
     message: quotedMedia,
   } : null);
   if (!target) return null;
@@ -1116,20 +1045,6 @@ async function getCommandProfileMedia(ctx: CommandContext): Promise<{ buffer: Bu
   const docMime = message.documentMessage?.mimetype || "";
   const type = message.videoMessage || docMime.startsWith("video/") ? "video" : "image";
   if (message.documentMessage && type !== "video") return null;
-  const downloaded = await downloadMediaMessage(
-    target as any,
-    "buffer",
-    {},
-    { reuploadRequest: (sock as any).updateMediaMessage } as any
-  );
+  const downloaded = await downloadMediaMessage(target as any, "buffer", {}, { reuploadRequest: (sock as any).updateMediaMessage } as any);
   return { buffer: Buffer.isBuffer(downloaded) ? downloaded : Buffer.from(downloaded as any), type };
-}
-
-function escapeXml(input: string): string {
-  return input
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
 }

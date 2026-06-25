@@ -1,12 +1,19 @@
 import type { CommandContext } from "./index.js";
 import { sendText } from "../connection.js";
-import { getBotSetting, getStaff, setBotSetting, getMentionName } from "../db/queries.js";
-import { downloadMediaMessage } from "@whiskeysockets/baileys";
+import { getMentionName } from "../db/queries.js";
+import { mentionTag } from "../utils.js";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import fs from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
 import { logger } from "../../lib/logger.js";
+
+const execFileAsync = promisify(execFile);
 
 export const INTERACTION_NAMES = new Set([
   "hug","kiss","slap","pat","punch","kill","hit","kidnap","lick","bonk","tickle",
-  "wave","dance","sad","smile","laugh","shrug",
+  "wave","dance","sad","smile","laugh","shrug","bite","cry","blush",
 ]);
 
 const ACTIONS: Record<string, { with: string[]; self: string[] }> = {
@@ -55,8 +62,20 @@ const ACTIONS: Record<string, { with: string[]; self: string[] }> = {
     self: ["tried to tickle themselves 🤷"],
   },
   wave: {
-    with: ["waved at {target}! 👋", "waves to {target}~ 🌊", "gives {target} a friendly wave! 👋"],
+    with: ["waved at {target}! 👋", "waves to {target}~ 🌊"],
     self: ["waves hello! 👋", "waves at everyone~ 🌊"],
+  },
+  bite: {
+    with: ["bites {target}! 😬", "nibbles on {target} 🦷", "chomps {target}! Ow! 😤"],
+    self: ["bit themselves... 🤦"],
+  },
+  cry: {
+    with: ["cries on {target}'s shoulder 😢", "bursts into tears in front of {target} 😭"],
+    self: ["is sobbing alone 😭"],
+  },
+  blush: {
+    with: ["blushes at {target} 😳", "turns bright red looking at {target} 🌹"],
+    self: ["is blushing for no reason 😳"],
   },
 };
 
@@ -68,29 +87,20 @@ const SOLO_ACTIONS: Record<string, string[]> = {
   shrug: ["shrugs. ¯\\_(ツ)_/¯", "doesn't know either 🤷"],
 };
 
-export async function handleInteraction(ctx: CommandContext): Promise<void> {
-  const { from, sender, args, command: cmd, msg, sock, isOwner, resolvedMentions } = ctx;
-  const name = getMentionName(sender);
-  const info = msg.message?.extendedTextMessage?.contextInfo;
-  const mentioned = resolvedMentions[0] || info?.participant || undefined;
+// nekos.best API endpoint mapping
+const NEKOS_MAP: Record<string, string> = {
+  pat: "pat", slap: "slap", hug: "hug", kiss: "kiss",
+  punch: "punch", bite: "bite", bonk: "bonk", lick: "lick",
+  tickle: "tickle", wave: "wave", kick: "kick", kill: "kill",
+  dance: "dance", sad: "sad", smile: "smile", blush: "blush",
+  cry: "cry", laugh: "laugh",
+};
 
-  if (args[0]?.toLowerCase() === "upload") {
-    if (!isOwner && !getStaff(sender)) {
-      await sendText(from, "❌ Only staff can upload interaction GIFs.");
-      return;
-    }
-    const uploaded = await getInteractionUpload(ctx).catch((err) => {
-      logger.error({ err, cmd }, "Failed to download interaction GIF");
-      return null;
-    });
-    if (!uploaded) {
-      await sendText(from, `❌ Reply to a GIF/video with .${cmd} upload to save it.\n\nMake sure you're replying to a GIF or video message.`);
-      return;
-    }
-    setBotSetting(`interaction_gif:${cmd}`, uploaded);
-    await sendText(from, `✅ GIF saved for *.${cmd}*! It will now be sent whenever someone uses this interaction.`);
-    return;
-  }
+export async function handleInteraction(ctx: CommandContext): Promise<void> {
+  const { from, sender, args, command: cmd, sock, resolvedMentions } = ctx;
+  const name = getMentionName(sender);
+  const info = ctx.msg.message?.extendedTextMessage?.contextInfo;
+  const mentioned = resolvedMentions[0] || info?.participant || undefined;
 
   if (SOLO_ACTIONS[cmd]) {
     const actions = SOLO_ACTIONS[cmd];
@@ -104,7 +114,7 @@ export async function handleInteraction(ctx: CommandContext): Promise<void> {
     if (mentioned) {
       const templates = actions.with;
       const tmpl = templates[Math.floor(Math.random() * templates.length)];
-      const text = `@${name} ${tmpl.replace("{target}", `@${getMentionName(mentioned)}`)}`;
+      const text = `@${name} ${tmpl.replace("{target}", `${mentionTag(mentioned)}`)}`;
       await sendInteractionResult(ctx, text, [sender, mentioned]);
     } else {
       const texts = actions.self;
@@ -115,63 +125,66 @@ export async function handleInteraction(ctx: CommandContext): Promise<void> {
 }
 
 async function sendInteractionResult(ctx: CommandContext, text: string, mentions: string[]): Promise<void> {
-  const gif = getBotSetting(`interaction_gif:${ctx.command}`);
-  if (gif && Buffer.isBuffer(gif)) {
-    await ctx.sock.sendMessage(ctx.from, {
-      video: gif,
-      gifPlayback: true,
-      caption: text,
-      mentions,
-      mimetype: "video/mp4",
-    });
-    return;
+  const gifBuffer = await fetchInteractionGif(ctx.command).catch(() => null);
+  if (gifBuffer) {
+    try {
+      await ctx.sock.sendMessage(ctx.from, {
+        video: gifBuffer,
+        gifPlayback: true,
+        caption: text,
+        mentions,
+        mimetype: "video/mp4",
+      });
+      return;
+    } catch (err) {
+      logger.warn({ err, cmd: ctx.command }, "Failed to send interaction GIF, falling back to text");
+    }
   }
   await ctx.sock.sendMessage(ctx.from, { text, mentions });
 }
 
-export async function uploadInteractionGif(ctx: CommandContext, interactionName: string): Promise<void> {
-  const { from, sender, isOwner } = ctx;
-  if (!isOwner && !getStaff(sender)) {
-    await sendText(from, "❌ Only staff can upload interaction GIFs.");
-    return;
+async function fetchInteractionGif(action: string): Promise<Buffer | null> {
+  const endpoint = NEKOS_MAP[action];
+  if (!endpoint) return null;
+
+  const res = await fetch(`https://nekos.best/api/v2/${endpoint}`, {
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!res.ok) return null;
+
+  const json = await res.json() as any;
+  const url: string | undefined = json?.results?.[0]?.url;
+  if (!url) return null;
+
+  const gifRes = await fetch(url, { signal: AbortSignal.timeout(10000) });
+  if (!gifRes.ok) return null;
+  const rawData = Buffer.from(await gifRes.arrayBuffer());
+
+  if (url.endsWith(".mp4") || url.includes(".mp4?")) {
+    return rawData;
   }
-  const uploaded = await getInteractionUpload(ctx).catch(() => null);
-  if (!uploaded) {
-    await sendText(from, `❌ Reply to a GIF/video with .upload ${interactionName} to save it.`);
-    return;
-  }
-  setBotSetting(`interaction_gif:${interactionName}`, uploaded);
-  await sendText(from, `✅ GIF saved for *.${interactionName}*! It will now be sent whenever someone uses this interaction.`);
+
+  return convertGifToMp4(rawData);
 }
 
-async function getInteractionUpload(ctx: CommandContext): Promise<Buffer | null> {
-  const info = ctx.msg.message?.extendedTextMessage?.contextInfo;
-  const quoted = info?.quotedMessage;
-
-  const directMsg = ctx.msg.message;
-  const directMedia = directMsg?.videoMessage || directMsg?.imageMessage || directMsg?.documentMessage || directMsg?.stickerMessage;
-  const quotedMedia = quoted?.videoMessage || quoted?.imageMessage || quoted?.documentMessage || quoted?.stickerMessage;
-
-  if (!directMedia && !quotedMedia) return null;
-
-  const target = directMedia
-    ? ctx.msg
-    : {
-        key: {
-          remoteJid: ctx.from,
-          fromMe: false,
-          id: info?.stanzaId || "",
-          participant: info?.participant,
-        },
-        message: quoted,
-      };
-
-  const downloaded = await downloadMediaMessage(
-    target as any,
-    "buffer",
-    {},
-    { reuploadRequest: (ctx.sock as any).updateMediaMessage } as any
-  );
-  const buf = Buffer.isBuffer(downloaded) ? downloaded : Buffer.from(downloaded as any);
-  return buf.length > 0 ? buf : null;
+async function convertGifToMp4(gifBuffer: Buffer): Promise<Buffer | null> {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "interaction-"));
+  try {
+    const inputPath = path.join(tmpDir, "input.gif");
+    const outputPath = path.join(tmpDir, "output.mp4");
+    await fs.writeFile(inputPath, gifBuffer);
+    await execFileAsync("ffmpeg", [
+      "-y", "-i", inputPath,
+      "-movflags", "+faststart",
+      "-pix_fmt", "yuv420p",
+      "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+      outputPath,
+    ], { maxBuffer: 20 * 1024 * 1024 });
+    return await fs.readFile(outputPath);
+  } catch (err) {
+    logger.warn({ err }, "GIF→MP4 conversion failed");
+    return null;
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
 }

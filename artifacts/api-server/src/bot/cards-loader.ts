@@ -1,153 +1,417 @@
 /**
  * cards-loader.ts
- * Reads cards.json (written by GitHub Actions scraper) and syncs
- * any new or updated cards into the bot's SQLite database.
+ * Reads unified_cards.jsonl (or cards.json as fallback) and syncs all cards
+ * into MongoDB using a unified schema — no shoob/mazoku distinction.
  *
- * Images are NOT stored in the DB — they are fetched on demand
- * from Shoob's CDN via media_url when a card is displayed.
- *
- * Called once at bot startup. Fast — only processes new cards.
+ * JSONL is processed line-by-line (readline), so we never load the whole
+ * file into memory at once.  This prevents the OOM crash on 512 MB instances.
  */
 import fs from "fs";
+import readline from "readline";
 import path from "path";
 import { fileURLToPath } from "url";
 import { randomBytes } from "crypto";
-import { getDb } from "./db/database.js";
+import { col } from "./db/mongo.js";
 import { logger } from "../lib/logger.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-// With esbuild bundling (single dist/index.mjs), __dirname = artifacts/api-server/dist/
-// cards.json lives at repo root: ../../../ from dist/ = Requiem3-main/cards.json
-// We also try process.cwd() as a fallback for different deployment layouts.
-function resolveCardsJson(): string {
-  const candidates = [
-    path.resolve(__dirname, "../../../cards.json"),        // esbuild bundle: dist/ → api-server/ → artifacts/ → root
-    path.resolve(__dirname, "../../../../cards.json"),      // tsc: dist/bot/ → dist/ → api-server/ → artifacts/ → root
-    path.resolve(process.cwd(), "cards.json"),             // running from repo root
-    path.resolve(process.cwd(), "../../cards.json"),       // running from artifacts/api-server/
+
+/* ── Resolve file path ─────────────────────────────────────────────────── */
+function resolveFile(names: string[]): string | null {
+  const roots = [
+    path.resolve(__dirname, "../../../"),
+    path.resolve(__dirname, "../../../../"),
+    process.cwd(),
+    path.resolve(process.cwd(), "../../"),
   ];
-  for (const p of candidates) {
-    if (fs.existsSync(p)) return p;
-  }
-  return candidates[0]; // return first candidate even if not found, for error logging
-}
-const CARDS_JSON = resolveCardsJson();
-
-export async function loadCardsFromRepo(): Promise<{ imported: number; updated: number; skipped: number }> {
-  const stats = { imported: 0, updated: 0, skipped: 0 };
-
-  logger.info({ cardsJsonPath: CARDS_JSON }, "Attempting to load cards from cards.json");
-
-  if (!fs.existsSync(CARDS_JSON)) {
-    logger.warn({ cardsJsonPath: CARDS_JSON }, "cards.json not found at expected path — skipping card loader");
-    return stats;
-  }
-
-  let data: any;
-  try {
-    const fileContent = fs.readFileSync(CARDS_JSON, "utf8");
-    data = JSON.parse(fileContent);
-  } catch (e) {
-    logger.error({ e, cardsJsonPath: CARDS_JSON }, "Failed to parse cards.json");
-    return stats;
-  }
-
-  const cards: any[] = data.cards || [];
-  if (cards.length === 0) {
-    logger.warn("cards.json is empty or has no 'cards' array");
-    return stats;
-  }
-
-  logger.info({ total: cards.length, cardsJsonPath: CARDS_JSON }, "Loading cards from cards.json...");
-  const db = getDb();
-
-  for (const card of cards) {
-    const shoobId = String(card.shoob_id || "").trim();
-    if (!shoobId) { 
-      stats.skipped++; 
-      continue; 
-    }
-
-    const existing = db.prepare(
-      "SELECT id FROM cards WHERE shoob_id = ?"
-    ).get(shoobId) as any;
-
-    if (existing) {
-      // Build media_url with proper CDN endpoint
-      const hasWebm = card.has_webm === true;
-      const mediaUrl = hasWebm
-        ? `https://api.shoob.gg/site/api/cardr/${shoobId}?type=webm`
-        : `https://api.shoob.gg/site/api/cardr/${shoobId}?size=400`;
-
-      db.prepare(`
-        UPDATE cards SET
-          name=?, tier=?, series=?, is_animated=?,
-          raw_data=?, file_hash=?, has_webm=?, has_webp=?, slug=?,
-          source='shoob'
-        WHERE id=?
-      `).run(
-        card.name, card.tier, card.series, card.is_animated ? 1 : 0,
-        JSON.stringify({ media_url: mediaUrl, has_webm: card.has_webm || false, _id: card.shoob_id }),
-        card.file_hash || "",
-        card.has_webm ? 1 : 0,
-        card.has_webp ? 1 : 0,
-        card.slug || "",
-        existing.id,
-      );
-      db.prepare(
-        "INSERT OR IGNORE INTO shoob_imported_ids (shoob_id, local_card_id) VALUES (?, ?)"
-      ).run(shoobId, existing.id);
-      stats.updated++;
-      logger.debug({ shoobId, cardName: card.name }, "Updated existing card");
-      continue;
-    }
-
-    const localId = genId(db);
-    try {
-      // Build media_url with proper CDN endpoint
-      const hasWebm = card.has_webm === true;
-      const mediaUrl = hasWebm
-        ? `https://api.shoob.gg/site/api/cardr/${shoobId}?type=webm`
-        : `https://api.shoob.gg/site/api/cardr/${shoobId}?size=400`;
-
-      db.prepare(`
-        INSERT INTO cards
-          (id, name, series, tier, image_data, is_animated,
-           uploaded_by, source, shoob_id,
-           raw_data, file_hash, has_webm, has_webp, slug)
-        VALUES (?, ?, ?, ?, NULL, ?, 'github-actions', 'shoob', ?, ?, ?, ?, ?, ?)
-      `).run(
-        localId,
-        card.name, card.series, card.tier,
-        card.is_animated ? 1 : 0,
-        shoobId,
-        JSON.stringify({ media_url: mediaUrl, has_webm: card.has_webm || false, _id: card.shoob_id }),
-        card.file_hash || "",
-        card.has_webm ? 1 : 0,
-        card.has_webp ? 1 : 0,
-        card.slug || "",
-      );
-      db.prepare(
-        "INSERT OR IGNORE INTO shoob_imported_ids (shoob_id, local_card_id) VALUES (?, ?)"
-      ).run(shoobId, localId);
-      stats.imported++;
-      logger.debug({ shoobId, cardName: card.name, localId }, "Imported new card");
-    } catch (e: any) {
-      logger.error({ e, shoobId, cardName: card.name }, "Failed to insert card");
-      stats.skipped++;
+  for (const name of names) {
+    for (const root of roots) {
+      const p = path.join(root, name);
+      if (fs.existsSync(p)) return p;
     }
   }
-
-  logger.info(stats, "✅ cards.json load complete — cards are now available to web API and bot commands");
-  return stats;
+  return null;
 }
 
+/* ── Tiny ID generator ─────────────────────────────────────────────────── */
 const ID_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-function genId(db: any): string {
+async function genId(): Promise<string> {
   for (let i = 0; i < 50; i++) {
     const c = Array.from(randomBytes(8) as Uint8Array)
       .map((b: number) => ID_CHARS[b % ID_CHARS.length]).join("");
-    if (!db.prepare("SELECT 1 FROM cards WHERE id=?").get(c)) return c;
+    if (!await col("cards").findOne({ _id: c as any }, { projection: { _id: 1 } })) return c;
   }
   return "C" + Date.now().toString(36).toUpperCase();
+}
+
+/* ── Stream JSONL file, yield one card per line ─────────────────────────── */
+async function* streamJsonl(filePath: string): AsyncGenerator<any> {
+  const rl = readline.createInterface({
+    input: fs.createReadStream(filePath, { encoding: "utf8" }),
+    crlfDelay: Infinity,
+  });
+  for await (const line of rl) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      yield JSON.parse(trimmed);
+    } catch {
+      // skip malformed lines
+    }
+  }
+}
+
+/* ── Stream cards.json (legacy) without loading the whole array ─────────── */
+async function* streamCardsJson(filePath: string): AsyncGenerator<any> {
+  // For legacy cards.json we load the whole file because it uses a JSON array.
+  // This is the FALLBACK path; prefer unified_cards.jsonl when available.
+  logger.warn("Falling back to cards.json (consider running merge_cards.js)");
+  const raw = fs.readFileSync(filePath, "utf8");
+  const data = JSON.parse(raw);
+  const cards: any[] = data.cards || [];
+  for (const c of cards) yield c;
+}
+
+/* ── Normalise a raw card from either source ───────────────────────────── */
+const MAZOKU_TIER: Record<string, string> = { C: "T2", R: "T4", SR: "T5", SSR: "T6", UR: "TS" };
+const ANIMATED    = new Set(["T6", "TS", "TX", "TZ"]);
+
+function normaliseCard(raw: any, isJsonl: boolean): any | null {
+  // unified_cards.jsonl cards already have normalized fields
+  if (isJsonl) {
+    const id = String(raw.shoob_id || raw.mazoku_id || raw.id || "").trim();
+    if (!id) return null;
+    const isAnimated = raw.is_animated === true || raw.is_animated === 1 || ANIMATED.has(raw.tier || "");
+    const isEvent    = raw.is_event === true || raw.is_event === 1;
+    return {
+      name:        raw.name   || "Unknown",
+      series:      raw.series || "General",
+      tier:        raw.tier   || "T1",
+      is_animated: isAnimated ? 1 : 0,
+      is_event:    isEvent ? 1 : 0,
+      event_name:  raw.event_name || null,
+      shoob_id:    raw.shoob_id  || null,
+      mazoku_id:   raw.mazoku_id || null,
+      image_url:   raw.image_url || null,
+      webm_url:    raw.webm_url  || null,
+      gif_url:     raw.gif_url   || null,
+      has_webm:    raw.has_webm  ? 1 : 0,
+      has_webp:    raw.has_webp  ? 1 : 0,
+      file_hash:   raw.file_hash || null,
+      slug:        raw.slug      || null,
+      source:      raw.source    || "shoob",
+      _primaryId:  id,
+    };
+  }
+
+  // Legacy cards.json format (shoob only)
+  const shoobId = String(raw.shoob_id || "").trim();
+  if (!shoobId) return null;
+  const hasWebm    = raw.has_webm === true || raw.has_webm === 1;
+  const isAnimated = raw.is_animated === true || raw.is_animated === 1 || ANIMATED.has(raw.tier || "");
+  return {
+    name:        raw.name   || "Unknown",
+    series:      raw.series || "General",
+    tier:        raw.tier   || "T1",
+    is_animated: isAnimated ? 1 : 0,
+    shoob_id:    shoobId,
+    mazoku_id:   null,
+    image_url:   `https://api.shoob.gg/site/api/cardr/${shoobId}?size=400`,
+    webm_url:    hasWebm ? `https://api.shoob.gg/site/api/cardr/${shoobId}?type=webm` : null,
+    gif_url:     null,
+    has_webm:    hasWebm ? 1 : 0,
+    has_webp:    raw.has_webp ? 1 : 0,
+    file_hash:   raw.file_hash || null,
+    slug:        raw.slug      || null,
+    source:      "shoob",
+    _primaryId:  shoobId,
+  };
+}
+
+/* ── Main export ───────────────────────────────────────────────────────── */
+export async function loadCardsFromRepo(): Promise<{ imported: number; updated: number; skipped: number }> {
+  const stats = { imported: 0, updated: 0, skipped: 0 };
+
+  // Prefer unified JSONL; fall back to legacy cards.json
+  const jsonlPath = resolveFile(["unified_cards.jsonl"]);
+  const jsonPath  = resolveFile(["cards.json"]);
+  const filePath  = jsonlPath || jsonPath;
+  const isJsonl   = !!jsonlPath;
+
+  if (!filePath) {
+    logger.warn("Neither unified_cards.jsonl nor cards.json found — skipping card loader");
+    return stats;
+  }
+
+  const metaKey = isJsonl ? "unified_jsonl" : "shoob_json";
+  logger.info({ filePath, isJsonl }, "Card loader starting");
+
+  /* Fast-skip: file unchanged and DB already populated */
+  let fileSize = 0;
+  try { fileSize = fs.statSync(filePath).size; } catch {}
+
+  if (fileSize > 0) {
+    const meta = await col("sync_meta").findOne({ _id: metaKey as any }).catch(() => null);
+    if (meta && meta.file_size === fileSize && meta.imported_count > 0) {
+      logger.info({ importedCount: meta.imported_count }, "Card file unchanged — skipping sync");
+      return stats;
+    }
+  }
+
+  /* ── One-time cleanup: collapse any EXISTING duplicate documents that
+   * already share the same shoob_id or mazoku_id. These are leftovers from
+   * the old insert logic (random _id per insert, dedup tracked in a
+   * separate, non-atomically-written collection) — a crash mid-sync could
+   * leave the same card inserted twice under different local ids. The
+   * upsert-by-shoob_id/mazoku_id added above prevents NEW duplicates, but
+   * does nothing to clean up ones that already exist, since updateOne only
+   * ever touches the first match. This pass finds and merges them down to
+   * one document each, going forward. ── */
+  try {
+    const dupGroups = await col("cards").aggregate([
+      { $match: { shoob_id: { $ne: null } } },
+      { $group: { _id: "$shoob_id", ids: { $push: "$_id" }, count: { $sum: 1 } } },
+      { $match: { count: { $gt: 1 } } },
+    ]).toArray().catch(() => [] as any[]);
+
+    const mazokuDupGroups = await col("cards").aggregate([
+      { $match: { mazoku_id: { $ne: null } } },
+      { $group: { _id: "$mazoku_id", ids: { $push: "$_id" }, count: { $sum: 1 } } },
+      { $match: { count: { $gt: 1 } } },
+    ]).toArray().catch(() => [] as any[]);
+
+    const allDupGroups = [...dupGroups, ...mazokuDupGroups];
+    if (allDupGroups.length > 0) {
+      const allDupIds = allDupGroups.flatMap((g: any) => g.ids);
+      const ownedIds = new Set(
+        (await col("user_cards").find(
+          { card_id: { $in: allDupIds } },
+          { projection: { card_id: 1 } }
+        ).toArray()).map((d: any) => d.card_id)
+      );
+
+      const toDelete: any[] = [];
+      for (const g of allDupGroups) {
+        const ids: any[] = g.ids;
+        // Prefer to keep a copy that's owned by a player; otherwise keep the
+        // first (oldest-inserted) copy. Delete the rest.
+        const ownedCopy = ids.find((id) => ownedIds.has(id));
+        const keepId = ownedCopy ?? ids[0];
+        for (const id of ids) {
+          if (id !== keepId) toDelete.push(id);
+        }
+      }
+      if (toDelete.length > 0) {
+        await col("cards").deleteMany({ _id: { $in: toDelete } });
+        logger.info(
+          { duplicateGroups: allDupGroups.length, documentsRemoved: toDelete.length },
+          "Card sync: collapsed pre-existing duplicate documents sharing the same shoob_id/mazoku_id"
+        );
+      }
+    }
+  } catch (e: any) {
+    logger.warn({ e: e.message }, "Pre-existing duplicate cleanup failed (non-fatal)");
+  }
+
+  /* Collect already-imported primary IDs (shoob_id OR mazoku_id) directly
+   * from the cards collection itself — this is the single source of truth.
+   * (Previously this read from separate shoob_imported_ids/mazoku_imported_ids
+   * tracking collections, which could silently fall out of sync with `cards`
+   * if the process crashed between the two writes, causing the same card to
+   * be re-imported as a brand-new duplicate document on the next sync.) */
+  const existingCardIdDocs = await col("cards")
+    .find({}, { projection: { shoob_id: 1, mazoku_id: 1 } })
+    .toArray()
+    .catch(() => [] as any[]);
+  const importedIds = new Set<string>();
+  for (const d of existingCardIdDocs) {
+    if (d.shoob_id)  importedIds.add(d.shoob_id);
+    if (d.mazoku_id) importedIds.add(d.mazoku_id);
+  }
+
+  /* Skip sync if DB already has at least as many docs as the file */
+  const existingCount = await col("cards").countDocuments().catch(() => 0);
+  if (existingCount > 0 && importedIds.size > 0) {
+    // We'll still run to catch new additions, but only skip if sizes match
+  }
+
+  const stream = isJsonl ? streamJsonl(filePath) : streamCardsJson(filePath);
+
+  // Track seen image URLs to eliminate duplicate cards that share the same image
+  const seenImageUrls = new Set<string>();
+  // Pre-load existing image URLs from MongoDB to avoid re-importing duplicates
+  try {
+    const existingUrls = await col("cards").find(
+      { image_url: { $ne: null } },
+      { projection: { image_url: 1 } }
+    ).toArray();
+    for (const doc of existingUrls) {
+      if (doc.image_url) seenImageUrls.add(doc.image_url);
+    }
+    logger.info({ seenCount: seenImageUrls.size }, "Pre-loaded existing image URLs for dedup");
+  } catch (e: any) {
+    logger.warn({ e: e.message }, "Could not pre-load image URLs for dedup (non-fatal)");
+  }
+
+  const BATCH = 50;
+  let batch: any[] = [];
+
+  const processBatch = async () => {
+    const cardOps: any[] = [];
+
+    for (const raw of batch) {
+      const card = normaliseCard(raw, isJsonl);
+      if (!card) { stats.skipped++; continue; }
+
+      const pid = card._primaryId;
+      delete card._primaryId;
+
+      // Deduplicate by image_url — skip cards whose URL we've already seen
+      const cardImageUrl = card.image_url as string | null;
+      if (cardImageUrl && seenImageUrls.has(cardImageUrl)) {
+        stats.skipped++;
+        continue;
+      }
+      if (cardImageUrl) seenImageUrls.add(cardImageUrl);
+
+      // Upsert keyed on the card's own shoob_id/mazoku_id (NOT a randomly
+      // generated local id, and NOT a separate tracking collection). This is
+      // what makes the sync crash-safe: if the process dies mid-batch (e.g.
+      // an unhandled rejection elsewhere takes down the whole instance) and
+      // the same batch gets reprocessed on the next run, this upsert can
+      // only ever touch the ONE document that already has this shoob_id/
+      // mazoku_id — it can never insert a second document for the same
+      // card. The old design generated a brand-new random _id on every
+      // insert and relied on a separate, non-atomically-written tracking
+      // collection to remember "already imported" — a crash between the two
+      // writes could desync them, and the next sync would then insert the
+      // same card again under a new id. That's how true duplicates (absent
+      // from the source JSON entirely) accumulated in Mongo over time.
+      const field = card.shoob_id ? "shoob_id" : "mazoku_id";
+      if (importedIds.has(pid)) {
+        cardOps.push({
+          updateOne: { filter: { [field]: pid }, update: { $set: card } },
+        });
+        stats.updated++;
+      } else {
+        const localId = await genId();
+        cardOps.push({
+          updateOne: {
+            filter: { [field]: pid },
+            update: {
+              $set: card,
+              $setOnInsert: { _id: localId as any, created_at: Math.floor(Date.now() / 1000) },
+            },
+            upsert: true,
+          },
+        });
+        importedIds.add(pid);
+        stats.imported++;
+      }
+    }
+
+    try {
+      if (cardOps.length) await col("cards").bulkWrite(cardOps, { ordered: false });
+    } catch (e: any) { logger.warn({ e: e.message }, "Card bulk write partial error"); }
+
+    // Best-effort mirror into the legacy tracking collections, for other
+    // tools (the scraper, manual sync routes) that still query them. This is
+    // NOT relied on for dedup correctness — that's enforced by the upsert
+    // above keyed directly on shoob_id/mazoku_id in `cards`. If this write
+    // fails or is skipped by a crash, nothing breaks; it only affects
+    // anything reading these collections directly for stats/lookups.
+    try {
+      const trackingOps: any[] = [];
+      for (const op of cardOps) {
+        const doc = op.insertOne?.document || op.updateOne?.update?.$set;
+        if (!doc) continue;
+        if (doc.shoob_id) {
+          trackingOps.push({
+            updateOne: {
+              filter: { shoob_id: doc.shoob_id },
+              update: { $setOnInsert: { shoob_id: doc.shoob_id } },
+              upsert: true,
+            },
+          });
+        }
+      }
+      if (trackingOps.length) await col("shoob_imported_ids").bulkWrite(trackingOps, { ordered: false });
+    } catch (e: any) { logger.warn({ e: e.message }, "Legacy tracking collection mirror failed (non-fatal)"); }
+
+    batch = [];
+  };
+
+  let totalSeen = 0;
+  for await (const raw of stream) {
+    totalSeen++;
+    batch.push(raw);
+    if (batch.length >= BATCH) await processBatch();
+  }
+  if (batch.length > 0) await processBatch();
+
+  // ── Reconciliation: remove any card in Mongo whose shoob_id/mazoku_id no
+  // longer appears in the current source file. Without this, cards imported
+  // under an older export (before an ID changed, or before a dedup pass on
+  // the file itself) stick around forever as orphaned duplicates — the file
+  // and the database silently drift apart over repeated syncs. We only run
+  // this when the sync actually read a non-trivial number of cards, so a
+  // truncated/failed read of the file can't wipe out the whole collection.
+  if (isJsonl && totalSeen > 0) {
+    try {
+      const currentIdsStream = streamJsonl(filePath);
+      const currentIds = new Set<string>();
+      for await (const raw of currentIdsStream) {
+        const pid = String(raw.shoob_id || raw.mazoku_id || raw.id || "").trim();
+        if (pid) currentIds.add(pid);
+      }
+
+      if (currentIds.size > 0) {
+        const allCardIds = await col("cards").find({}, { projection: { _id: 1, shoob_id: 1, mazoku_id: 1 } }).toArray();
+        const staleMongoIds: any[] = [];
+        const staleShoobIds: string[] = [];
+        const staleMazokuIds: string[] = [];
+        for (const doc of allCardIds) {
+          const pid = String(doc.shoob_id || doc.mazoku_id || "").trim();
+          if (pid && !currentIds.has(pid)) {
+            staleMongoIds.push(doc._id);
+            if (doc.shoob_id)  staleShoobIds.push(doc.shoob_id);
+            if (doc.mazoku_id) staleMazokuIds.push(doc.mazoku_id);
+          }
+        }
+        if (staleMongoIds.length > 0) {
+          // Don't delete cards that players already own — unequip them from
+          // circulation (no longer spawnable/orphaned-safe) but never destroy
+          // a card that's sitting in someone's collection.
+          const ownedCardIds = new Set(
+            (await col("user_cards").find(
+              { card_id: { $in: staleMongoIds } },
+              { projection: { card_id: 1 } }
+            ).toArray()).map((d: any) => d.card_id)
+          );
+          const safeToDelete = staleMongoIds.filter((id) => !ownedCardIds.has(id));
+          if (safeToDelete.length > 0) {
+            await col("cards").deleteMany({ _id: { $in: safeToDelete } });
+          }
+          if (staleShoobIds.length)  await col("shoob_imported_ids").deleteMany({ shoob_id: { $in: staleShoobIds } });
+          if (staleMazokuIds.length) await col("mazoku_imported_ids").deleteMany({ mazoku_id: { $in: staleMazokuIds } });
+          logger.info(
+            { staleFound: staleMongoIds.length, deleted: safeToDelete.length, keptOwned: staleMongoIds.length - safeToDelete.length },
+            "Card reconciliation: removed orphaned cards not present in current source file"
+          );
+        }
+      }
+    } catch (e: any) {
+      logger.warn({ e: e.message }, "Card reconciliation step failed (non-fatal)");
+    }
+  }
+
+  // Persist metadata for fast-skip on future cold starts
+  await col("sync_meta").updateOne(
+    { _id: metaKey as any },
+    { $set: { file_size: fileSize, imported_count: totalSeen, synced_at: Math.floor(Date.now() / 1000) } },
+    { upsert: true }
+  ).catch(() => {});
+
+  logger.info({ ...stats, totalSeen, isJsonl }, "✅ Card sync complete");
+  return stats;
 }

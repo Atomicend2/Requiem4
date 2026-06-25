@@ -2,12 +2,12 @@ services:
   - type: web
     name: requiem-order
     env: node
-    region: oregon
+    region: frankfurt
     plan: free
     buildCommand: >-
       pnpm install &&
-      PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/.playwright node_modules/.bin/playwright install chromium --with-deps &&
-      pnpm --filter @workspace/shadow-garden run build &&
+      PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/.playwright pnpm exec playwright install chromium --with-deps &&
+      cd artifacts/shadow-garden && pnpm exec vite build --config vite.config.ts && cd ../.. &&
       node artifacts/api-server/build.mjs
     startCommand: PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/.playwright node --enable-source-maps artifacts/api-server/dist/index.mjs
     healthCheckPath: /api/healthz
@@ -16,6 +16,8 @@ services:
         value: production
       - key: PORT
         value: 10000
+      - key: NODE_OPTIONS
+        value: "--max-old-space-size=460"
       - key: BOT_PHONE_NUMBER
         sync: false
       - key: BOT_OWNER_PHONE
@@ -32,9 +34,7 @@ services:
         sync: false
       - key: ADMIN_PASSWORD
         sync: false
+      - key: MONGODB_URI
+        sync: false
       - key: DATA_DIR
         value: /data
-    disk:
-      name: requiem-order-data
-      mountPath: /data
-      sizeGB: 1

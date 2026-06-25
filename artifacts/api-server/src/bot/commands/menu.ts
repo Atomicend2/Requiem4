@@ -2,8 +2,9 @@ import type { CommandContext } from "./index.js";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { getDb, DB_DIR } from "../db/database.js";
-import { getMentionName } from "../db/queries.js";
+import { DB_DIR } from "../db/database.js";
+import { col } from "../db/mongo.js";
+import { getMentionName, getStaff } from "../db/queries.js";
 import { mentionTag } from "../utils.js";
 import { getBotName } from "../connection.js";
 import { downloadMediaMessage } from "@whiskeysockets/baileys";
@@ -12,15 +13,89 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MENU_ASSETS_DIR = path.join(DB_DIR, "menu-assets");
 if (!fs.existsSync(MENU_ASSETS_DIR)) fs.mkdirSync(MENU_ASSETS_DIR, { recursive: true });
 
+export async function handleStaffMenu(ctx: CommandContext): Promise<void> {
+  const { from, sender, sock, isOwner } = ctx;
+  const staff = await getStaff(sender);
+  const role = isOwner ? "owner" : (staff as any)?.role;
+  if (!role || !["owner", "guardian", "mod"].includes(role)) {
+    await sock.sendMessage(from, { text: "❌ This command is for staff only." });
+    return;
+  }
+
+  const staffMenu =
+`🌸━━━『 反逆 』━━━🌸
+✦ Staff Command Reference ✦
+👑 Your role: ${role.toUpperCase()}
+
+❀━━━━━━━━━━━━━━❀
+        👮 MODERATION
+❀━━━━━━━━━━━━━━❀
+➺ .ban @user [reason] — Ban a user globally
+➺ .unban @user — Lift a global ban
+➺ .banlist — View all banned users
+➺ .warn @user [reason] — Warn a member (group-level)
+➺ .resetwarn — Clear a member's warnings
+
+❀━━━━━━━━━━━━━━❀
+       🛡️ STAFF MANAGEMENT
+❀━━━━━━━━━━━━━━❀
+➺ .bots — List all managed bot instances
+➺ .modlist / .mods / .modslist / .cardmakers — List all staff
+➺ .addmod @user — Promote to mod (guardian/owner only)
+➺ .addguardian @user — Promote to guardian (owner only)
+➺ .removemod @user — Demote a mod
+➺ .removeguardian @user — Demote a guardian
+➺ .recruit @user — Mark a user as a recruit
+➺ .addpremium @user [days] — Grant premium
+➺ .removepremium @user — Remove premium
+➺ .addrole @user [role] — Set a custom display role
+➺ .restart — Restart the bot process
+
+❀━━━━━━━━━━━━━━❀
+      🃏 CARD MANAGEMENT
+❀━━━━━━━━━━━━━━❀
+➺ .upload — Upload a new card (reply to image/video)
+➺ .fetchcards — Re-sync cards from unified_cards.jsonl
+➺ .summon [tier] [@user] — Force-spawn a card
+➺ .dc — Disable card spawning in this group
+➺ .ac — Enable card spawning in this group
+➺ .rc — Toggle card spawning in this group
+➺ .frame delete <code or number> — Delete a frame (staff)
+➺ .delcard / .deletecard <copy_id> — Permanently delete a player's card copy
+
+❀━━━━━━━━━━━━━━❀
+      📢 GROUPS / BROADCAST
+❀━━━━━━━━━━━━━━❀
+➺ .post <text> — Broadcast a message to all groups
+➺ .join <invite link> — Make the bot join a group
+➺ .exit — Make the bot leave the current group
+➺ .show — Show all groups the bot is in
+➺ .setms <key> <value> — Set a bot setting
+➺ .delms <key> — Delete a bot setting
+➺ .rules [text] — Set this group's staff-managed rules
+➺ .website — Show the website link (staff variant)
+
+❀━━━━━━━━━━━━━━❀
+       💰 USER MANAGEMENT
+❀━━━━━━━━━━━━━━❀
+➺ .resetbal @user — Reset a user's balance to 0
+➺ .reset @user — Fully reset a user's profile (owner only)
+➺ .addinv @user <item> [qty] — Give a user an inventory item
+
+✨ ━━━━━━━━━━━━━━✨
+This list is staff-only — regular players see *.menu* instead.
+✨ ━━━━━━━━━━━━━━✨`;
+
+  await sock.sendMessage(from, { text: staffMenu, mentions: [sender] });
+}
+
 export async function handleMenu(ctx: CommandContext): Promise<void> {
   const { from, sender, sock } = ctx;
-  // Use phone number in text for a real WhatsApp mention tag
-  const senderTag = mentionTag(sender);   // e.g. @2348012345678
-  const senderName = getMentionName(sender); // display name for profile line
+  const senderTag = mentionTag(sender);
   const botName = getBotName();
 
   const menuText =
-`🌸━━━『 𝗥𝗘𝗤𝗨𝗜𝗘𝗠 反逆 』━━━🌸
+`🌸━━━『 反逆 』━━━🌸
 
 ✦ Where Stars Touch The Sky ✦
 
@@ -62,8 +137,13 @@ export async function handleMenu(ctx: CommandContext): Promise<void> {
 ➺ .open / .close
 ➺ .purge [code]
 ➺ .antism on/off
+➺ .antibot on/off
 ➺ .blacklist add/remove/list
 ➺ .groupstats / .gs
+➺ .activity
+➺ .active / .inactive
+➺ .gclink / .gcl
+➺ .rules
 ➺ .setmenuimg
 
 ❀━━━━━━━━━━━━━━❀
@@ -86,6 +166,7 @@ export async function handleMenu(ctx: CommandContext): Promise<void> {
 ➺ .work / .dig / .fish / .beg
 ➺ .steal / .roast
 ➺ .stats / .cds
+➺ .frame [id]
 
 ❀━━━━━━━━━━━━━━❀
            🎴 𝗖𝗔𝗥𝗗𝗦
@@ -100,16 +181,53 @@ export async function handleMenu(ctx: CommandContext): Promise<void> {
 ➺ .slb <series>
 ➺ .cs <series>
 ➺ .mycollectionseries
+➺ .tier — Your cards grouped by tier
+➺ .myseries — Your cards grouped by series
+➺ .fuse / .fusion / .forge <tier> — Fuse duplicates into a higher tier
 ➺ .cardleaderboard / .cardlb
 ➺ .cardshop / .stardust
 ➺ .get [id]
 ➺ .vs @user
-➺ .auction / .myauc
-➺ .listauc / .bid [id] [amt]
+➺ .auction / .auctions
+➺ .myauc / .listauc [index] [price] [h]
+➺ .bid [id] [amount]
+➺ .remauc <auction_id> — Cancel your own auction
 ➺ .cg @user
 ➺ .ctd / .lcd / .retrieve
 ➺ .sellc / .tc
 ➺ .accept / .decline
+
+❀━━━━━━━━━━━━━━❀
+         ⚔️ 𝗥𝗣𝗚
+❀━━━━━━━━━━━━━━❀
+➺ .rpg — View your RPG stats
+➺ .rpgstats — Full stats breakdown
+➺ .class — Choose/view your class
+➺ .adventure — Go on an adventure
+➺ .achievements / .achieve
+➺ .explore — Explore new areas
+➺ .rest — Rest to recover
+➺ .territory / .claim — View, claim, or set tax on world territories
+
+❀━━━━━━━━━━━━━━❀
+        🏰 𝗗𝗨𝗡𝗚𝗘𝗢𝗡
+❀━━━━━━━━━━━━━━❀
+➺ .dungeon — Enter a dungeon
+➺ .attack — Attack in a dungeon battle
+➺ .heavy — Heavy attack (slower, harder hit)
+➺ .defend — Defend, reducing incoming damage
+➺ .flee — Flee from a dungeon battle
+➺ .quest — View active quests
+➺ .raid — Raid an enemy boss
+➺ .boss — Challenge a boss
+➺ .heal — Heal your character
+
+❀━━━━━━━━━━━━━━❀
+           🤖 𝗔𝗜
+❀━━━━━━━━━━━━━━❀
+➺ .ai / .gpt / .chat <text>
+➺ .translate / .tt <text>
+➺ .mood — Check Echidna's mood
 
 ❀━━━━━━━━━━━━━━❀
            🎮 𝗚𝗔𝗠𝗘𝗦
@@ -135,6 +253,29 @@ export async function handleMenu(ctx: CommandContext): Promise<void> {
 ➺ .coinflip / .cf
 ➺ .doublebet / .doublepayout
 ➺ .roulette / .horse / .spin
+
+❀━━━━━━━━━━━━━━❀
+           🎟️ 𝗟𝗢𝗧𝗧𝗘𝗥𝗬
+❀━━━━━━━━━━━━━━❀
+➺ .lottery — View lottery info
+➺ .ll — Buy a lottery ticket
+➺ .lp — Check your tickets
+➺ .drawlottery — Draw lottery (if eligible)
+
+❀━━━━━━━━━━━━━━❀
+    🌐 𝗪𝗘𝗕 / 𝗔𝗖𝗖𝗢𝗨𝗡𝗧
+❀━━━━━━━━━━━━━━❀
+➺ .website — Open the web dashboard
+➺ .reg <phone> — Register your account
+➺ .verify <code> — Verify OTP
+
+❀━━━━━━━━━━━━━━❀
+          🖼️ 𝗠𝗘𝗗𝗜𝗔
+❀━━━━━━━━━━━━━━❀
+➺ .sticker / .s — Convert to sticker
+➺ .toimg / .turnimg — Sticker to image
+➺ .take — Take a screenshot
+➺ .pintimg — Save an image
 
 ❀━━━━━━━━━━━━━━❀
             🎭 𝗙𝗨𝗡
@@ -163,21 +304,15 @@ export async function handleMenu(ctx: CommandContext): Promise<void> {
 ✨ ━━━━━━━━━━━━━━✨`;
 
   try {
-    const db = getDb();
-    // is_primary is never actually set anywhere in this codebase (single-bot
-    // setup), so relying on it always returned nothing even when an image
-    // was configured. Prefer is_primary = 1 if it's ever set, otherwise fall
-    // back to the only/first bot row.
-    const bot = (
-      db.prepare("SELECT id, menu_image_url FROM bots WHERE is_primary = 1").get() ||
-      db.prepare("SELECT id, menu_image_url FROM bots ORDER BY created_at ASC LIMIT 1").get()
-    ) as any;
+    const bot = await col("bots").findOne(
+      {},
+      { sort: { is_primary: -1, created_at: 1 } }
+    );
     const imageUrl = bot?.menu_image_url;
 
     if (imageUrl) {
       let imageBuffer: Buffer | null = null;
 
-      // Support both a local file path and a remote http(s) URL
       if (imageUrl.startsWith("http://") || imageUrl.startsWith("https://")) {
         try {
           const res = await fetch(imageUrl, { signal: AbortSignal.timeout(10000) });
@@ -201,8 +336,6 @@ export async function handleMenu(ctx: CommandContext): Promise<void> {
       }
     }
 
-    // No image configured (or it failed to load) — send text-only, but let
-    // the owner/guardian know how to fix that instead of silently degrading.
     await sock.sendMessage(from, {
       text: menuText,
       mentions: [sender],
@@ -215,37 +348,19 @@ export async function handleMenu(ctx: CommandContext): Promise<void> {
   }
 }
 
-// .setmenuimg — owner/guardian only. Reply to an image (or send one) with
-// .setmenuimg to set the image that accompanies every .menu send from then on.
 export async function handleSetMenuImage(ctx: CommandContext): Promise<void> {
-  const { from, msg, sock } = ctx;
+  const { from, sock, msg } = ctx;
 
-  const directImage = msg.message?.imageMessage ? msg : null;
-  const context = msg.message?.extendedTextMessage?.contextInfo;
-  const quoted = context?.quotedMessage;
-  const quotedImage = quoted?.imageMessage ? quoted : null;
-  const target = directImage || (quotedImage ? {
-    key: {
-      remoteJid: from,
-      fromMe: false,
-      id: context?.stanzaId || "",
-      participant: context?.participant,
-    },
-    message: quotedImage,
-  } : null);
-
-  if (!target) {
-    await sock.sendMessage(from, {
-      text: "❌ Send an image with the caption *.setmenuimg*, or reply to an image with *.setmenuimg*.",
-    });
+  const quoted = (msg.message as any)?.extendedTextMessage?.contextInfo?.quotedMessage;
+  if (!quoted?.imageMessage) {
+    await sock.sendMessage(from, { text: "❌ Reply to an image with *.setmenuimg* to set it as the menu image." });
     return;
   }
 
   try {
     const downloaded = await downloadMediaMessage(
-      target as any,
+      { message: quoted, key: msg.key } as any,
       "buffer",
-      {},
       { reuploadRequest: (sock as any).updateMediaMessage } as any
     );
     const buffer = Buffer.isBuffer(downloaded) ? downloaded : Buffer.from(downloaded as any);
@@ -253,24 +368,22 @@ export async function handleSetMenuImage(ctx: CommandContext): Promise<void> {
     const filePath = path.join(MENU_ASSETS_DIR, "menu.jpg");
     fs.writeFileSync(filePath, buffer);
 
-    const db = getDb();
-    const bot = (
-      db.prepare("SELECT id FROM bots WHERE is_primary = 1").get() ||
-      db.prepare("SELECT id FROM bots ORDER BY created_at ASC LIMIT 1").get()
-    ) as any;
+    const bot = await col("bots").findOne(
+      {},
+      { sort: { is_primary: -1, created_at: 1 } }
+    );
     if (!bot) {
       await sock.sendMessage(from, { text: "❌ No bot record found to attach the image to. Contact the developer." });
       return;
     }
-    db.prepare("UPDATE bots SET menu_image_url = ? WHERE id = ?").run(filePath, bot.id);
+    await col("bots").updateOne({ _id: bot._id }, { $set: { menu_image_url: filePath } });
 
     await sock.sendMessage(from, { text: "✅ Menu image updated. Every *.menu* from now on will include it." });
-  } catch (err) {
+  } catch {
     await sock.sendMessage(from, { text: "❌ Couldn't save that image. Try again with a JPG or PNG." });
   }
 }
 
-// .help — light per-command descriptions
 export async function handleHelp(ctx: CommandContext): Promise<void> {
   const { from, sock } = ctx;
   const help = `📖 *Requiem Order 反逆 — Command Guide*\n\n` +
@@ -286,10 +399,14 @@ export async function handleHelp(ctx: CommandContext): Promise<void> {
     `• *.warn @user [reason]* — Warns a member (5 = kick)\n` +
     `• *.antilink set [delete/warn/kick]* — Auto-remove links\n` +
     `• *.antism on/off* — Deletes status-mention messages\n` +
+    `• *.antibot on/off* — Auto-remove bot accounts\n` +
     `• *.blacklist add/remove [number]* — Block a phone number from the group\n` +
     `• *.purge [country_code]* — Remove all non-admins from a country code\n` +
     `• *.welcome on/off / .setwelcome [msg]* — New member message\n` +
     `• *.hidetag [text]* — Silently tag all members\n` +
+    `• *.activity* — Check group activity score\n` +
+    `• *.gclink* — Get the group invite link\n` +
+    `• *.rules* — View group rules\n` +
     `• *.setmenuimg* — Set the image attached to .menu (reply to an image)\n\n` +
     `*💰 ECONOMY*\n` +
     `• *.reg <phone>* — Register / link your WhatsApp account\n` +
@@ -305,7 +422,14 @@ export async function handleHelp(ctx: CommandContext): Promise<void> {
     `• *.ss [series]* — View all cards in a series\n` +
     `• *.cs [series]* — View your cards from a specific series\n` +
     `• *.vs @user* — Battle another player's deck\n` +
-    `• *.auction / .bid [id] [amt]* — Auction cards\n\n` +
+    `• *.auction / .bid [id] [amt]* — Auction cards\n` +
+    `• *.mzsearch [name]* — Search Mazoku cards by name\n` +
+    `• *.mzseries [series]* — Browse Mazoku cards by series\n\n` +
+    `*⚔️ RPG*\n` +
+    `• *.rpg* — View your RPG character\n` +
+    `• *.adventure* — Go on an adventure\n` +
+    `• *.quest* — View active quests\n` +
+    `• *.dungeon* — Enter a dungeon\n\n` +
     `*🎮 GAMES*\n` +
     `• *.ttt @user* — Tic Tac Toe\n` +
     `• *.c4 @user* — Connect Four\n` +
@@ -316,7 +440,6 @@ export async function handleHelp(ctx: CommandContext): Promise<void> {
   await sock.sendMessage(from, { text: help });
 }
 
-// .info — bot stats and info
 export async function handleInfo(ctx: CommandContext): Promise<void> {
   const { from, sender, sock } = ctx;
   const uptime = process.uptime();
@@ -326,10 +449,11 @@ export async function handleInfo(ctx: CommandContext): Promise<void> {
   const s = Math.floor(uptime % 60);
   const uptimeStr = d > 0 ? `${d}d ${h}h ${m}m ${s}s` : `${h}h ${m}m ${s}s`;
 
-  const db = getDb();
-  const groupCount = (db.prepare("SELECT COUNT(*) as c FROM groups").get() as any)?.c || 0;
-  const userCount = (db.prepare("SELECT COUNT(*) as c FROM users WHERE registered = 1 AND COALESCE(is_bot, 0) = 0").get() as any)?.c || 0;
-  const cardCount = (db.prepare("SELECT COUNT(*) as c FROM cards").get() as any)?.c || 0;
+  const [groupCount, userCount, cardCount] = await Promise.all([
+    col("groups").countDocuments({}),
+    col("users").countDocuments({ registered: 1, is_bot: { $ne: 1 } }),
+    col("cards").countDocuments({}),
+  ]);
 
   const info = `🌌 *Requiem Order Bot — 反逆*\n\n` +
     `🌌 Bot: ${ctx.sock.user?.name || "Requiem Order"}\n` +

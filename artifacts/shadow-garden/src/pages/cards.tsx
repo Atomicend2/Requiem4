@@ -22,13 +22,42 @@ const TIER_CONFIG: Record<string, { label: string; bg: string; text: string; bor
 
 const CARDS_PER_PAGE = 10;
 
-async function fetchCardsFromJson(params: { page: number; tier?: string; search?: string }) {
+async function fetchAuctions(): Promise<any[]> {
+  const res = await fetch("/api/v1/auctions");
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  return data.auctions || [];
+}
+
+async function fetchCardsFromJson(params: { page: number; tier?: string; search?: string; sortBy?: string }, signal?: AbortSignal) {
   const url = new URL("/api/v1/cards/from-json", window.location.origin);
   url.searchParams.set("page", String(params.page));
   url.searchParams.set("limit", String(CARDS_PER_PAGE));
   if (params.tier && params.tier !== "all") url.searchParams.set("tier", params.tier);
   if (params.search) url.searchParams.set("search", params.search);
-  const res = await fetch(url.toString());
+  if (params.sortBy) url.searchParams.set("sortBy", params.sortBy);
+  const res = await fetch(url.toString(), { signal });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+async function fetchEventCards(
+  params: { page: number; event?: string; tier?: string; search?: string; sortBy?: string },
+  signal?: AbortSignal
+) {
+  const url = new URL("/api/events", window.location.origin);
+  url.searchParams.set("page", String(params.page));
+  url.searchParams.set("limit", String(CARDS_PER_PAGE));
+  // "event" is never a fixed list on the frontend — whatever values the API
+  // reports in availableEvents (itself derived live from whatever event_name
+  // strings actually exist in the database) are what populate the dropdown.
+  // Tagging a new card with any event_name, e.g. "lny" or "special", makes
+  // it filterable here immediately with no code change on either side.
+  if (params.event && params.event !== "all") url.searchParams.set("event", params.event);
+  if (params.tier && params.tier !== "all") url.searchParams.set("tier", params.tier);
+  if (params.search) url.searchParams.set("search", params.search);
+  if (params.sortBy) url.searchParams.set("sortBy", params.sortBy);
+  const res = await fetch(url.toString(), { signal });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
@@ -42,9 +71,11 @@ async function fetchCardDetail(cardId: string): Promise<any> {
 export default function Cards() {
   const { isAuthenticated, user } = useAuth();
   const [tierFilter, setTierFilter] = useState<string>("all");
+  const [sortBy, setSortBy] = useState<string>("created_at");
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [page, setPage] = useState(1);
+  const reqIdRef = useRef(0);
   const { toast } = useToast();
   const [selectedCard, setSelectedCard] = useState<any | null>(null);
 
@@ -54,23 +85,29 @@ export default function Cards() {
   }, [search]);
 
   useEffect(() => { setPage(1); }, [tierFilter]);
+  useEffect(() => { setPage(1); }, [sortBy]);
 
   const [allCardsData, setAllCardsData] = useState<{ cards: any[]; total: number; pages: number } | null>(null);
   const [loadingAll, setLoadingAll] = useState(true);
   const [allCardsError, setAllCardsError] = useState<Error | null>(null);
 
   const loadCards = useCallback(async () => {
+    const myId = ++reqIdRef.current;
     setLoadingAll(true);
     setAllCardsError(null);
+    const controller = new AbortController();
     try {
-      const data = await fetchCardsFromJson({ page, tier: tierFilter, search: debouncedSearch });
+      const data = await fetchCardsFromJson({ page, tier: tierFilter, search: debouncedSearch, sortBy }, controller.signal);
+      if (myId !== reqIdRef.current) return; // stale — a newer request is already running
       setAllCardsData(data);
     } catch (err: any) {
+      if (err?.name === "AbortError") return;
+      if (myId !== reqIdRef.current) return;
       setAllCardsError(err);
     } finally {
-      setLoadingAll(false);
+      if (myId === reqIdRef.current) setLoadingAll(false);
     }
-  }, [page, tierFilter, debouncedSearch]);
+  }, [page, tierFilter, debouncedSearch, sortBy]);
 
   useEffect(() => { loadCards(); }, [loadCards]);
 
@@ -79,6 +116,110 @@ export default function Cards() {
   });
 
   const isPremium = (user as any)?.premium === 1;
+
+  const [activeTab, setActiveTab] = useState("all");
+
+  // ── Auction tab state ─────────────────────────────────────────────────────────
+  const [auctionData, setAuctionData] = useState<any[]>([]);
+  const [auctionLoading, setAuctionLoading] = useState(false);
+  const [auctionLoaded, setAuctionLoaded] = useState(false);
+  const [bidModalAuction, setBidModalAuction] = useState<any | null>(null);
+  const [bidAmount, setBidAmount] = useState("");
+  const [bidLoading, setBidLoading] = useState(false);
+  const [auctionTick, setAuctionTick] = useState(0);
+
+  // ── Events tab state ──────────────────────────────────────────────────────────
+  const [eventsLoaded, setEventsLoaded] = useState(false);
+  const [eventsData, setEventsData] = useState<any | null>(null);
+  const [eventsLoading, setEventsLoading] = useState(false);
+  const [eventsError, setEventsError] = useState<any | null>(null);
+  const [eventPage, setEventPage] = useState(1);
+  const [eventFilter, setEventFilter] = useState<string>("all");
+  const [eventTierFilter, setEventTierFilter] = useState<string>("all");
+  const [eventSortBy, setEventSortBy] = useState<string>("created_at");
+  const eventReqIdRef = useRef(0);
+
+  useEffect(() => { setEventPage(1); }, [eventFilter, eventTierFilter, eventSortBy]);
+
+  useEffect(() => {
+    if (!eventsLoaded) return;
+    const myId = ++eventReqIdRef.current;
+    const controller = new AbortController();
+    setEventsLoading(true);
+    setEventsError(null);
+    (async () => {
+      try {
+        const data = await fetchEventCards(
+          { page: eventPage, event: eventFilter, tier: eventTierFilter, sortBy: eventSortBy, search: debouncedSearch },
+          controller.signal
+        );
+        if (myId !== eventReqIdRef.current) return;
+        setEventsData(data);
+      } catch (err: any) {
+        if (err?.name === "AbortError") return;
+        if (myId !== eventReqIdRef.current) return;
+        setEventsError(err);
+      } finally {
+        if (myId === eventReqIdRef.current) setEventsLoading(false);
+      }
+    })();
+    return () => controller.abort();
+  }, [eventsLoaded, eventPage, eventFilter, eventTierFilter, eventSortBy, debouncedSearch]);
+
+  const loadAuctions = useCallback(async () => {
+    setAuctionLoading(true);
+    try {
+      const auctions = await fetchAuctions();
+      setAuctionData(auctions);
+    } catch {
+    } finally {
+      setAuctionLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!auctionLoaded) return;
+    loadAuctions();
+    const refresh = setInterval(loadAuctions, 30000);
+    const tick = setInterval(() => setAuctionTick((v) => v + 1), 1000);
+    return () => { clearInterval(refresh); clearInterval(tick); };
+  }, [auctionLoaded, loadAuctions]);
+
+  const handleBid = async () => {
+    if (!bidModalAuction) return;
+    const amount = parseInt(bidAmount, 10);
+    if (isNaN(amount) || amount <= 0) { toast({ title: "Invalid amount", variant: "destructive" }); return; }
+    setBidLoading(true);
+    try {
+      const res = await fetch(`/api/v1/auctions/${bidModalAuction.id}/bid`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ amount }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Bid failed");
+      toast({ title: "Bid placed!", description: `You bid $${amount.toLocaleString()}` });
+      setBidModalAuction(null);
+      setBidAmount("");
+      loadAuctions();
+    } catch (err: any) {
+      toast({ title: "Bid failed", description: err.message, variant: "destructive" });
+    } finally {
+      setBidLoading(false);
+    }
+  };
+
+  const formatTimeLeft = (endTime: number) => {
+    const secs = Math.max(0, endTime - Math.floor(Date.now() / 1000));
+    if (secs === 0) return "Ended";
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = secs % 60;
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  };
 
   return (
     <div className="min-h-screen p-4 md:p-8 max-w-7xl mx-auto">
@@ -93,7 +234,7 @@ export default function Cards() {
         <p className="text-muted-foreground mt-2">Collect legendary cards from the Requiem Order universe.</p>
       </div>
 
-      <Tabs defaultValue="all" className="w-full">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
         <TabsList className="flex w-full max-w-2xl bg-black/40 border border-primary/10 p-1 gap-1 overflow-x-auto mb-6">
           <TabsTrigger value="all" className="flex-1 data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:neon-border-sky font-bold tracking-wider uppercase text-xs rounded-sm">
             All Cards {allCardsData ? `(${allCardsData.total.toLocaleString()})` : ""}
@@ -107,8 +248,19 @@ export default function Cards() {
           <TabsTrigger value="fusion" className="flex-1 data-[state=active]:bg-rose-500/20 data-[state=active]:text-rose-400 font-bold tracking-wider uppercase text-xs rounded-sm whitespace-nowrap">
             Fusion
           </TabsTrigger>
-          <TabsTrigger value="auction" className="flex-1 data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-400 font-bold tracking-wider uppercase text-xs rounded-sm whitespace-nowrap">
-            Auction
+          <TabsTrigger
+            value="events"
+            className="flex-1 data-[state=active]:bg-pink-500/20 data-[state=active]:text-pink-400 font-bold tracking-wider uppercase text-xs rounded-sm whitespace-nowrap"
+            onClick={() => { if (!eventsLoaded) setEventsLoaded(true); }}
+          >
+            Events {eventsData ? `(${eventsData.count.toLocaleString()})` : ""}
+          </TabsTrigger>
+          <TabsTrigger
+            value="auction"
+            className="flex-1 data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-400 font-bold tracking-wider uppercase text-xs rounded-sm whitespace-nowrap"
+            onClick={() => { if (!auctionLoaded) setAuctionLoaded(true); }}
+          >
+            Auction {auctionData.length > 0 ? `(${auctionData.length})` : ""}
           </TabsTrigger>
         </TabsList>
 
@@ -123,17 +275,72 @@ export default function Cards() {
               className="pl-9 bg-black/40 border-primary/20 text-white focus-visible:ring-primary placeholder:text-muted-foreground"
             />
           </div>
-          <Select value={tierFilter} onValueChange={setTierFilter}>
-            <SelectTrigger className="w-full sm:w-[200px] bg-black/40 border-primary/20 text-white">
-              <SelectValue placeholder="Filter by Tier" />
-            </SelectTrigger>
-            <SelectContent className="bg-[#0A0A0F] border-primary/20 text-white">
-              <SelectItem value="all">All Tiers</SelectItem>
-              {Object.entries(TIER_CONFIG).map(([key, cfg]) => (
-                <SelectItem key={key} value={key}>{key} — {cfg.label}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          {activeTab === "events" ? (
+            <>
+              <Select value={eventFilter} onValueChange={setEventFilter}>
+                <SelectTrigger className="w-full sm:w-[180px] bg-black/40 border-primary/20 text-white">
+                  <SelectValue placeholder="Filter by Event" />
+                </SelectTrigger>
+                <SelectContent className="bg-[#0A0A0F] border-primary/20 text-white">
+                  <SelectItem value="all">All Events</SelectItem>
+                  {/* Populated entirely from what's actually in the database
+                      (eventsData.availableEvents, via GET /api/events) — no
+                      hardcoded list. Tagging a card with a brand-new
+                      event_name makes it show up here automatically. */}
+                  {(eventsData?.availableEvents || []).map((ev: string) => (
+                    <SelectItem key={ev} value={ev} className="capitalize">{ev}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Select value={eventTierFilter} onValueChange={setEventTierFilter}>
+                <SelectTrigger className="w-full sm:w-[180px] bg-black/40 border-primary/20 text-white">
+                  <SelectValue placeholder="Filter by Tier" />
+                </SelectTrigger>
+                <SelectContent className="bg-[#0A0A0F] border-primary/20 text-white">
+                  <SelectItem value="all">All Tiers</SelectItem>
+                  {Object.entries(TIER_CONFIG).map(([key, cfg]) => (
+                    <SelectItem key={key} value={key}>{key} — {cfg.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Select value={eventSortBy} onValueChange={setEventSortBy}>
+                <SelectTrigger className="w-full sm:w-[180px] bg-black/40 border-primary/20 text-white">
+                  <SelectValue placeholder="Sort by" />
+                </SelectTrigger>
+                <SelectContent className="bg-[#0A0A0F] border-primary/20 text-white">
+                  <SelectItem value="created_at">Newest</SelectItem>
+                  <SelectItem value="name">Name (A–Z)</SelectItem>
+                  <SelectItem value="tier">Tier</SelectItem>
+                  <SelectItem value="series">Series (A–Z)</SelectItem>
+                </SelectContent>
+              </Select>
+            </>
+          ) : (
+            <>
+              <Select value={tierFilter} onValueChange={setTierFilter}>
+                <SelectTrigger className="w-full sm:w-[180px] bg-black/40 border-primary/20 text-white">
+                  <SelectValue placeholder="Filter by Tier" />
+                </SelectTrigger>
+                <SelectContent className="bg-[#0A0A0F] border-primary/20 text-white">
+                  <SelectItem value="all">All Tiers</SelectItem>
+                  {Object.entries(TIER_CONFIG).map(([key, cfg]) => (
+                    <SelectItem key={key} value={key}>{key} — {cfg.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Select value={sortBy} onValueChange={setSortBy}>
+                <SelectTrigger className="w-full sm:w-[180px] bg-black/40 border-primary/20 text-white">
+                  <SelectValue placeholder="Sort by" />
+                </SelectTrigger>
+                <SelectContent className="bg-[#0A0A0F] border-primary/20 text-white">
+                  <SelectItem value="created_at">Newest</SelectItem>
+                  <SelectItem value="name">Name (A–Z)</SelectItem>
+                  <SelectItem value="tier">Tier</SelectItem>
+                  <SelectItem value="series">Series (A–Z)</SelectItem>
+                </SelectContent>
+              </Select>
+            </>
+          )}
         </div>
 
         {/* ALL CARDS */}
@@ -179,6 +386,55 @@ export default function Cards() {
             </>
           ) : (
             <Empty text="No cards match your filters. Try adjusting your search or tier selection." />
+          )}
+        </TabsContent>
+
+        {/* EVENT CARDS */}
+        <TabsContent value="events" className="mt-0">
+          {!eventsLoaded ? null : eventsLoading && !eventsData ? (
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+              {[1,2,3,4,5,6,7,8,9,10].map((i) => <CardSkeleton key={i} />)}
+            </div>
+          ) : eventsError ? (
+            <ErrorState text="Failed to load event cards. Please check your connection and try again." icon={<AlertCircle className="w-8 h-8 text-red-400" />} />
+          ) : eventsData && eventsData.data.length > 0 ? (
+            <>
+              <p className="text-xs text-muted-foreground mb-4">
+                Event cards are exclusive to limited-time events and never appear from normal spawns — these can only be obtained by playing an active event game while it's running.
+              </p>
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+                {eventsData.data.map((card: any) => (
+                  <CardDisplay key={card.id} card={card} onOpen={setSelectedCard} />
+                ))}
+              </div>
+              {eventsData.pages > 1 && (
+                <div className="flex items-center justify-center gap-3 mt-8">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setEventPage(p => Math.max(1, p - 1))}
+                    disabled={eventPage <= 1}
+                    className="bg-black/40 border-primary/20 text-white hover:bg-primary/10"
+                  >
+                    <ChevronLeft className="w-4 h-4" />
+                  </Button>
+                  <span className="text-sm text-muted-foreground font-mono">
+                    Page {eventPage} / {eventsData.pages}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setEventPage(p => Math.min(eventsData.pages, p + 1))}
+                    disabled={eventPage >= eventsData.pages}
+                    className="bg-black/40 border-primary/20 text-white hover:bg-primary/10"
+                  >
+                    <ChevronRight className="w-4 h-4" />
+                  </Button>
+                </div>
+              )}
+            </>
+          ) : (
+            <Empty text="No event cards match your filters yet." />
           )}
         </TabsContent>
 
@@ -243,24 +499,149 @@ export default function Cards() {
 
         {/* FUSION */}
         <TabsContent value="fusion" className="mt-0">
-          <LockedPanel
-            color="sky"
-            icon={<Flame className="w-10 h-10 text-rose-400 animate-pulse" />}
-            title="Card Fusion"
-            desc="Sacrifice lower-tier cards and Gold to forge a card of higher power. The empire demands sacrifice to birth something greater."
-            badge="Coming Soon — In Development"
-          />
+          <FusionPanel isAuthenticated={isAuthenticated} myCards={myCards} />
         </TabsContent>
 
         {/* AUCTION */}
         <TabsContent value="auction" className="mt-0">
-          <LockedPanel
-            color="emerald"
-            icon={<Gavel className="w-10 h-10 text-emerald-400" />}
-            title="Requiem Order Auction House"
-            desc="List your cards for auction and let the highest bidder claim them. Trade rare cards with members across the rebellion."
-            badge="Coming Soon — In Development"
-          />
+          {/* Bid modal */}
+          {bidModalAuction && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm" onClick={() => setBidModalAuction(null)}>
+              <div className="relative w-full max-w-md rounded-2xl border border-emerald-500/30 bg-[#07070f] p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+                <button onClick={() => setBidModalAuction(null)} className="absolute top-4 right-4 w-7 h-7 rounded-full bg-black/60 border border-white/10 flex items-center justify-center text-muted-foreground hover:text-white">
+                  <X className="w-4 h-4" />
+                </button>
+                <div className="flex items-start gap-4 mb-5">
+                  {bidModalAuction.card_image_url ? (
+                    <img src={bidModalAuction.card_image_url} alt={bidModalAuction.card_name} className="w-16 h-20 object-cover rounded-lg border border-white/10 shrink-0" onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
+                  ) : (
+                    <div className="w-16 h-20 rounded-lg border border-white/10 bg-black/40 flex items-center justify-center shrink-0"><Gavel className="w-6 h-6 text-muted-foreground" /></div>
+                  )}
+                  <div>
+                    <div className={cn("inline-block px-2 py-0.5 rounded-full text-[10px] font-bold mb-1", (TIER_CONFIG[bidModalAuction.card_tier] || TIER_CONFIG["T1"]).bg, (TIER_CONFIG[bidModalAuction.card_tier] || TIER_CONFIG["T1"]).text)}>
+                      {bidModalAuction.card_tier} — {(TIER_CONFIG[bidModalAuction.card_tier] || TIER_CONFIG["T1"]).label}
+                    </div>
+                    <h3 className="font-bold text-white text-lg">{bidModalAuction.card_name}</h3>
+                    <p className="text-xs text-muted-foreground">{bidModalAuction.card_series}</p>
+                  </div>
+                </div>
+                <div className="space-y-3 mb-5 text-sm">
+                  <div className="flex justify-between"><span className="text-muted-foreground">Current bid</span><span className="text-white font-bold">${(bidModalAuction.current_bid || bidModalAuction.starting_price || 0).toLocaleString()}</span></div>
+                  <div className="flex justify-between"><span className="text-muted-foreground">Min increment</span><span className="text-white">${(bidModalAuction.min_increment || 100).toLocaleString()}</span></div>
+                  <div className="flex justify-between"><span className="text-muted-foreground">Time left</span><span className="text-emerald-400 font-mono">{formatTimeLeft(bidModalAuction.end_time)}</span></div>
+                  <div className="flex justify-between"><span className="text-muted-foreground">Seller</span><span className="text-white">{bidModalAuction.seller_name || "Unknown"}</span></div>
+                  {bidModalAuction.current_bidder_name && <div className="flex justify-between"><span className="text-muted-foreground">Leading</span><span className="text-amber-400">{bidModalAuction.current_bidder_name}</span></div>}
+                </div>
+                {isAuthenticated ? (
+                  <>
+                    <Input
+                      type="number"
+                      placeholder={`Min: $${((bidModalAuction.current_bid || bidModalAuction.starting_price || 0) + (bidModalAuction.min_increment || 100)).toLocaleString()}`}
+                      value={bidAmount}
+                      onChange={(e) => setBidAmount(e.target.value)}
+                      className="bg-black/40 border-emerald-500/30 text-white mb-3 focus-visible:ring-emerald-500"
+                    />
+                    <div className="flex gap-2">
+                      <Button variant="outline" onClick={() => setBidModalAuction(null)} className="flex-1 bg-black/40 border-white/10 text-white">Cancel</Button>
+                      <Button onClick={handleBid} disabled={bidLoading} className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white">
+                        {bidLoading ? "Bidding..." : "Place Bid"}
+                      </Button>
+                    </div>
+                  </>
+                ) : (
+                  <p className="text-center text-sm text-muted-foreground py-2">You must be logged in to place a bid.</p>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Auction header */}
+          <div className="mb-6 p-4 glass-card rounded-xl border border-emerald-500/20 bg-gradient-to-r from-emerald-500/5 via-transparent to-teal-500/5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-start gap-3">
+                <Gavel className="w-5 h-5 text-emerald-400 mt-0.5 shrink-0" />
+                <div>
+                  <p className="text-sm font-bold text-emerald-300 mb-0.5">Requiem Order Auction House</p>
+                  <p className="text-xs text-muted-foreground">Bid on rare cards listed by staff and recruits. Use <span className="font-mono text-emerald-300">.auctions</span> and <span className="font-mono text-emerald-300">.bid</span> in the bot.</p>
+                </div>
+              </div>
+              <Button variant="outline" size="sm" onClick={loadAuctions} disabled={auctionLoading} className="bg-black/40 border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/10 shrink-0">
+                <RefreshCw className={cn("w-3 h-3 mr-1", auctionLoading && "animate-spin")} /> Refresh
+              </Button>
+            </div>
+          </div>
+
+          {/* Auction grid */}
+          {!auctionLoaded ? (
+            <div className="text-center py-20">
+              <Gavel className="w-12 h-12 text-emerald-400/30 mx-auto mb-4" />
+              <p className="text-muted-foreground text-sm">Click the Auction tab to load live auctions</p>
+            </div>
+          ) : auctionLoading && auctionData.length === 0 ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+              {[1,2,3].map((i) => <CardSkeleton key={i} />)}
+            </div>
+          ) : auctionData.length === 0 ? (
+            <div className="text-center py-20">
+              <Gavel className="w-12 h-12 text-emerald-400/20 mx-auto mb-4" />
+              <p className="text-muted-foreground">No active auctions right now.</p>
+              <p className="text-xs text-muted-foreground/60 mt-1">Staff and recruits can list cards with <span className="font-mono">.listauc</span></p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+              {auctionData.map((a: any) => {
+                const cfg = TIER_CONFIG[a.card_tier] || TIER_CONFIG["T1"];
+                const timeLeft = formatTimeLeft(a.end_time);
+                const isEnding = Math.max(0, a.end_time - Math.floor(Date.now() / 1000)) < 3600;
+                return (
+                  <div key={a.id} className={cn("glass-card rounded-xl border overflow-hidden flex flex-col", cfg.border, cfg.glow)}>
+                    {/* Card image */}
+                    <div className="relative aspect-[3/4] bg-black/40 overflow-hidden">
+                      {a.card_image_url ? (
+                        <img src={a.card_image_url} alt={a.card_name} loading="eager"
+                          className="w-full h-full object-cover"
+                          onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center opacity-20"><Gavel className="w-8 h-8" /></div>
+                      )}
+                      <div className={cn("absolute top-2 left-2 rounded-full px-2 py-0.5 text-[10px] font-bold border", cfg.bg, cfg.text, cfg.border)}>
+                        {a.card_tier}
+                      </div>
+                      <div className={cn("absolute top-2 right-2 rounded-full px-2 py-0.5 text-[10px] font-bold", isEnding ? "bg-red-500/80 text-white" : "bg-black/60 text-emerald-400")}>
+                        ⏱ {timeLeft}
+                      </div>
+                    </div>
+                    {/* Info */}
+                    <div className="p-3 flex flex-col gap-2 flex-1">
+                      <div>
+                        <p className={cn("text-sm font-bold truncate", cfg.text)}>{a.card_name}</p>
+                        <p className="text-[11px] text-muted-foreground truncate">{a.card_series || "General"}</p>
+                      </div>
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="text-muted-foreground">Current bid</span>
+                        <span className="text-emerald-400 font-bold">${(a.current_bid || a.starting_price || 0).toLocaleString()}</span>
+                      </div>
+                      {a.current_bidder_name ? (
+                        <p className="text-[10px] text-amber-400/80 truncate">Leading: {a.current_bidder_name}</p>
+                      ) : (
+                        <p className="text-[10px] text-muted-foreground/60">No bids yet</p>
+                      )}
+                      <p className="text-[10px] text-muted-foreground truncate">By: {a.seller_name || "Unknown"}</p>
+                      <Button
+                        size="sm"
+                        className="mt-auto bg-emerald-600/80 hover:bg-emerald-500 text-white text-xs w-full"
+                        onClick={() => { setBidModalAuction(a); setBidAmount(""); }}
+                        disabled={a.end_time < Math.floor(Date.now() / 1000)}
+                      >
+                        <Gavel className="w-3 h-3 mr-1" />
+                        {a.end_time < Math.floor(Date.now() / 1000) ? "Ended" : "Place Bid"}
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </TabsContent>
       </Tabs>
     </div>
@@ -301,6 +682,7 @@ function CardModal({ card, onClose }: { card: any; onClose: () => void }) {
   const owners: any[] = detail?.owners ?? card.owners ?? [];
   const totalCopies: number = detail?.totalCopies ?? card.totalCopies ?? 0;
   const imageUrl: string = detail?.imageUrl ?? card.imageUrl ?? "";
+  const isVideo: boolean = detail?.isVideo ?? card.isVideo ?? false;
   const description: string = detail?.description ?? card.description ?? "";
 
   return (
@@ -323,14 +705,20 @@ function CardModal({ card, onClose }: { card: any; onClose: () => void }) {
           <X className="w-4 h-4" />
         </button>
 
-        {/* Full-size image */}
+        {/* Full-size image / video */}
         <div className={cn("relative w-full overflow-hidden rounded-t-2xl", cfg.bg)} style={{ minHeight: 280 }}>
           {imageUrl ? (
-            <img
-              src={imageUrl}
-              alt={card.name}
-              className="w-full object-contain max-h-[400px]"
-            />
+            <div className="w-full max-h-[400px] flex items-center justify-center">
+              <CardMedia
+                imageUrl={imageUrl}
+                gifUrl={detail?.gifUrl ?? card.gifUrl ?? imageUrl}
+                videoUrl={detail?.videoUrl ?? card.videoUrl ?? null}
+                isVideo={isVideo}
+                isAnimated={detail?.isAnimated ?? card.isAnimated}
+                name={card.name}
+                className="w-full object-contain max-h-[400px]"
+              />
+            </div>
           ) : (
             <div className="flex items-center justify-center h-64 opacity-30">
               <ImageOff className="w-12 h-12" />
@@ -438,10 +826,96 @@ function CardModal({ card, onClose }: { card: any; onClose: () => void }) {
   );
 }
 
+function CardMedia({
+  imageUrl, gifUrl, videoUrl, isVideo, isAnimated, name,
+  className, onLoaded, onError,
+}: {
+  imageUrl: string; gifUrl?: string; videoUrl?: string | null;
+  isVideo?: boolean; isAnimated?: boolean; name: string;
+  className?: string; onLoaded?: () => void; onError?: () => void;
+}) {
+  // isVideo = locally stored MP4 blob (served from /api/v1/cards/:id/image)
+  if (isVideo && imageUrl) {
+    return (
+      <video
+        src={imageUrl}
+        autoPlay muted loop playsInline
+        onLoadedData={onLoaded}
+        onError={onError}
+        className={className}
+      />
+    );
+  }
+
+  // isAnimated + videoUrl: WebM from CDN — use img (GIF) as fallback, video on top
+  if (isAnimated && videoUrl) {
+    return (
+      <div className="relative w-full h-full">
+        <img
+          decoding="async"
+          src={gifUrl || imageUrl}
+          alt={name}
+          loading="eager"
+          onLoad={onLoaded}
+          onError={onError}
+          className={cn("absolute inset-0 w-full h-full object-cover", className)}
+        />
+        <video
+          autoPlay loop muted playsInline
+          onLoadedData={onLoaded}
+          className={cn("absolute inset-0 w-full h-full object-cover", className)}
+        >
+          <source src={videoUrl} type="video/webm" />
+        </video>
+      </div>
+    );
+  }
+
+  // Default: static or GIF image
+  // Eager loading is used for all card images on this page (changed from a
+  // mixed lazy/eager strategy) — the card grid is the focal content of this
+  // page, so deferring offscreen images no longer made sense here.
+  return (
+    <img
+      decoding="async"
+      src={isAnimated ? (gifUrl || imageUrl) : imageUrl}
+      alt={name}
+      loading="eager"
+      onLoad={onLoaded}
+      onError={onError}
+      className={className}
+    />
+  );
+}
+
 function CardDisplay({ card, showOwned, onOpen }: { card: any; showOwned?: boolean; onOpen: (card: any) => void }) {
   const cfg = TIER_CONFIG[card.tier] || TIER_CONFIG["T1"];
   const [imgLoaded, setImgLoaded] = useState(false);
   const [imgError, setImgError] = useState(false);
+  const [retryKey, setRetryKey] = useState(0);
+  const [retryCount, setRetryCount] = useState(0);
+  const MAX_RETRIES = 2;
+
+  const handleImgError = () => {
+    if (retryCount < MAX_RETRIES) {
+      const delay = 1500 * (retryCount + 1);
+      setTimeout(() => {
+        setRetryCount((c) => c + 1);
+        setRetryKey((k) => k + 1);
+      }, delay);
+    } else {
+      setImgError(true);
+      setImgLoaded(true);
+    }
+  };
+
+  const handleManualRetry = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setImgError(false);
+    setImgLoaded(false);
+    setRetryCount(0);
+    setRetryKey((k) => k + 1);
+  };
 
   const hasImage = !!card.imageUrl;
 
@@ -461,21 +935,32 @@ function CardDisplay({ card, showOwned, onOpen }: { card: any; showOwned?: boole
           )}
 
           {hasImage && !imgError ? (
-            <img
-              src={card.imageUrl}
-              alt={card.name}
-              loading="lazy"
-              onLoad={() => setImgLoaded(true)}
-              onError={() => { setImgError(true); setImgLoaded(true); }}
-              className={cn(
-                "w-full h-full object-cover transition-all duration-500 group-hover:scale-105",
-                imgLoaded ? "opacity-100" : "opacity-0"
-              )}
-            />
+            <div className={cn(
+              "w-full h-full transition-all duration-500 group-hover:scale-105",
+              imgLoaded ? "opacity-100" : "opacity-0"
+            )}>
+              <CardMedia
+                key={retryKey}
+                imageUrl={card.imageUrl}
+                gifUrl={card.gifUrl}
+                videoUrl={card.videoUrl}
+                isVideo={card.isVideo}
+                isAnimated={card.isAnimated}
+                name={card.name}
+                className="w-full h-full object-cover"
+                onLoaded={() => setImgLoaded(true)}
+                onError={handleImgError}
+              />
+            </div>
           ) : (
-            <div className="absolute inset-0 w-full h-full flex flex-col items-center justify-center gap-2 opacity-40">
-              <ImageOff className="w-8 h-8" />
-              <span className="text-xs font-mono">No Image</span>
+            <div
+              className="absolute inset-0 w-full h-full flex flex-col items-center justify-center gap-2 cursor-pointer"
+              onClick={handleManualRetry}
+              title="Tap to retry loading image"
+            >
+              <ImageOff className="w-8 h-8 opacity-40" />
+              <span className="text-[10px] font-mono opacity-40">No Image</span>
+              <span className="text-[9px] text-primary/60 font-mono border border-primary/20 rounded px-2 py-0.5 mt-1">tap to retry</span>
             </div>
           )}
 
@@ -532,6 +1017,310 @@ function CardDisplay({ card, showOwned, onOpen }: { card: any; showOwned?: boole
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+const FUSE_RECIPES: { tier: string; cost: number; next: string }[] = [
+  { tier: "T1", cost: 10, next: "T2" },
+  { tier: "T2", cost: 8,  next: "T3" },
+  { tier: "T3", cost: 6,  next: "T4" },
+  { tier: "T4", cost: 5,  next: "T5" },
+  { tier: "T5", cost: 5,  next: "T6" },
+];
+
+const TIER_LABELS: Record<string, string> = {
+  T1:"Common", T2:"Uncommon", T3:"Rare", T4:"Epic", T5:"Legendary", T6:"Animated",
+};
+
+function FusionPanel({ isAuthenticated, myCards }: { isAuthenticated: boolean; myCards: any }) {
+  const { toast } = useToast();
+  const [fusingTier, setFusingTier] = useState<string | null>(null);
+  const [result, setResult] = useState<any | null>(null);
+  const { token } = useAuth();
+
+  // Card-selection state
+  const [stagingTier, setStagingTier] = useState<string | null>(null);
+  const [selectedCopyIds, setSelectedCopyIds] = useState<Set<string>>(new Set());
+
+  // Build per-tier card lists from my collection
+  const cardsByTier = (myCards?.cards ?? []).reduce((acc: Record<string, any[]>, uc: any) => {
+    const t = uc.card?.tier || uc.tier;
+    if (t) {
+      if (!acc[t]) acc[t] = [];
+      acc[t].push(uc);
+    }
+    return acc;
+  }, {} as Record<string, any[]>);
+
+  const openPicker = (tier: string) => {
+    setStagingTier(tier);
+    setSelectedCopyIds(new Set());
+    setResult(null);
+  };
+
+  const closePicker = () => {
+    setStagingTier(null);
+    setSelectedCopyIds(new Set());
+  };
+
+  const toggleCard = (copyId: string, cost: number) => {
+    setSelectedCopyIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(copyId)) {
+        next.delete(copyId);
+      } else if (next.size < cost) {
+        next.add(copyId);
+      }
+      return next;
+    });
+  };
+
+  const handleFuse = async (tier: string, cardIds: string[]) => {
+    setFusingTier(tier);
+    setResult(null);
+    try {
+      const r = await fetch("/api/v1/cards/fuse", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ tier, cardIds }),
+      });
+      const j = await r.json();
+      if (j.success) {
+        setResult(j.result);
+        closePicker();
+        toast({ title: "⚗️ Fusion Successful!", description: `You fused a ${j.result.tier} card: ${j.result.name}` });
+      } else {
+        toast({ title: "Fusion Failed", description: j.message, variant: "destructive" });
+      }
+    } catch {
+      toast({ title: "Error", description: "Could not reach the server.", variant: "destructive" });
+    } finally {
+      setFusingTier(null);
+    }
+  };
+
+  if (!isAuthenticated) {
+    return (
+      <LockedPanel
+        color="sky"
+        icon={<Flame className="w-10 h-10 text-rose-400 animate-pulse" />}
+        title="Card Fusion"
+        desc="Sacrifice lower-tier duplicates to fuse a card of higher power. Log in to access the Fusion Chamber."
+        badge="Login Required"
+      />
+    );
+  }
+
+  return (
+    <div className="space-y-8">
+      {/* Header */}
+      <div className="glass-card rounded-xl border border-rose-500/20 bg-rose-500/5 p-6 relative overflow-hidden">
+        <div className="absolute inset-0 bg-gradient-to-br from-rose-500/8 via-transparent to-transparent" />
+        <div className="relative z-10 flex items-center gap-4">
+          <div className="w-14 h-14 rounded-full bg-rose-500/15 border border-rose-500/30 flex items-center justify-center shadow-[0_0_24px_rgba(244,63,94,0.3)]">
+            <Flame className="w-7 h-7 text-rose-400 animate-pulse" />
+          </div>
+          <div>
+            <h3 className="font-serif text-2xl font-bold text-white">Fusion Chamber</h3>
+            <p className="text-muted-foreground text-sm mt-0.5">Choose which cards to sacrifice — fuse them into a card of higher power.</p>
+          </div>
+        </div>
+      </div>
+
+      {/* Card picker modal */}
+      {stagingTier && (() => {
+        const recipe = FUSE_RECIPES.find((r) => r.tier === stagingTier)!;
+        const tierCards: any[] = cardsByTier[stagingTier] || [];
+        const cfg = TIER_CONFIG[stagingTier];
+        const nextCfg = TIER_CONFIG[recipe.next];
+        const ready = selectedCopyIds.size === recipe.cost;
+        const loading = fusingTier === stagingTier;
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-sm animate-in fade-in duration-200" onClick={closePicker}>
+            <div
+              className={cn("relative w-full max-w-lg rounded-2xl border bg-[#07070f] shadow-2xl animate-in zoom-in-95 duration-200 overflow-hidden", cfg?.border)}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Header */}
+              <div className={cn("p-5 border-b", "border-white/5", cfg?.bg)}>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className={cn("text-xs font-bold uppercase tracking-widest", cfg?.text)}>
+                      {stagingTier} → {recipe.next} Fusion
+                    </p>
+                    <p className="text-white text-lg font-serif font-bold mt-0.5">
+                      Select {recipe.cost} cards to sacrifice
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <div className={cn(
+                      "px-3 py-1 rounded-full text-sm font-bold border font-mono",
+                      ready ? "bg-rose-500/20 border-rose-500/50 text-rose-300" : "border-white/10 text-white/40"
+                    )}>
+                      {selectedCopyIds.size}/{recipe.cost}
+                    </div>
+                    <button onClick={closePicker} className="w-8 h-8 rounded-full bg-black/60 border border-white/10 flex items-center justify-center text-muted-foreground hover:text-white transition-colors">
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+                {/* Fusion arrow */}
+                <div className="flex items-center gap-2 mt-3">
+                  <div className={cn("px-2 py-0.5 rounded text-xs font-bold border", cfg?.bg, cfg?.text, cfg?.border)}>{stagingTier} ×{recipe.cost}</div>
+                  <Sparkles className="w-3 h-3 text-rose-400" />
+                  <div className={cn("px-2 py-0.5 rounded text-xs font-bold border", nextCfg?.bg, nextCfg?.text, nextCfg?.border)}>{recipe.next} ×1</div>
+                  <span className="text-white/30 text-xs ml-1">(random)</span>
+                </div>
+              </div>
+
+              {/* Card list */}
+              <div className="max-h-80 overflow-y-auto p-3 space-y-2">
+                {tierCards.length === 0 ? (
+                  <p className="text-center text-muted-foreground py-8 text-sm">No {stagingTier} cards in your collection.</p>
+                ) : tierCards.map((uc: any) => {
+                  const card = uc.card || uc;
+                  const copyId = String(uc.userCardId || card.copyId || card.id);
+                  const isSelected = selectedCopyIds.has(copyId);
+                  const isDisabled = !isSelected && selectedCopyIds.size >= recipe.cost;
+                  return (
+                    <button
+                      key={copyId}
+                      onClick={() => toggleCard(copyId, recipe.cost)}
+                      disabled={isDisabled}
+                      className={cn(
+                        "w-full flex items-center gap-3 px-3 py-2.5 rounded-lg border text-left transition-all",
+                        isSelected
+                          ? `${cfg?.bg} ${cfg?.border} shadow-md`
+                          : isDisabled
+                          ? "border-white/5 bg-white/2 opacity-40 cursor-not-allowed"
+                          : "border-white/8 bg-black/30 hover:border-white/20 hover:bg-white/5"
+                      )}
+                    >
+                      {/* Checkbox indicator */}
+                      <div className={cn(
+                        "w-5 h-5 rounded border flex items-center justify-center shrink-0 transition-all",
+                        isSelected ? `${cfg?.border} ${cfg?.bg}` : "border-white/20 bg-black/40"
+                      )}>
+                        {isSelected && <span className={cn("text-xs font-bold", cfg?.text)}>✓</span>}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-white truncate">{card.name}</p>
+                        <p className="text-[10px] text-white/40 truncate">{card.series || "General"} · Copy #{copyId}</p>
+                      </div>
+                      {isSelected && (
+                        <span className={cn("text-[10px] font-bold uppercase shrink-0", cfg?.text)}>Selected</span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Confirm */}
+              <div className="p-4 border-t border-white/5">
+                <Button
+                  onClick={() => handleFuse(stagingTier, Array.from(selectedCopyIds))}
+                  disabled={!ready || loading}
+                  className={cn(
+                    "w-full h-11 font-bold uppercase tracking-widest text-xs transition-all",
+                    ready
+                      ? "bg-rose-500/20 hover:bg-rose-500/40 text-rose-400 border border-rose-500/50 shadow-[0_0_14px_rgba(244,63,94,0.2)]"
+                      : "bg-white/5 text-white/20 border border-white/5 cursor-not-allowed"
+                  )}
+                >
+                  {loading ? (
+                    <><RefreshCw className="w-3 h-3 mr-2 animate-spin" /> Fusing…</>
+                  ) : ready ? (
+                    <><Flame className="w-3 h-3 mr-2" /> Confirm Fusion — Sacrifice {recipe.cost} {stagingTier}</>
+                  ) : (
+                    <>Select {recipe.cost - selectedCopyIds.size} more card{recipe.cost - selectedCopyIds.size !== 1 ? "s" : ""}</>
+                  )}
+                </Button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Recipes */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        {FUSE_RECIPES.map(({ tier, cost, next }) => {
+          const tierCardList: any[] = cardsByTier[tier] || [];
+          const have = tierCardList.length;
+          const canFuse = have >= cost;
+          const cfg = TIER_CONFIG[tier];
+          const nextCfg = TIER_CONFIG[next];
+
+          return (
+            <div key={tier} className={cn(
+              "glass-card rounded-xl border p-5 flex flex-col gap-4 transition-all",
+              canFuse ? `${cfg?.border} hover:scale-[1.02]` : "border-white/5 opacity-60"
+            )}>
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className={cn("text-xs font-bold uppercase tracking-widest mb-0.5", cfg?.text)}>{tier} — {TIER_LABELS[tier]}</p>
+                  <p className="text-white/40 text-xs">Requires {cost} cards · you have {have}</p>
+                </div>
+                <div className={cn("px-2 py-0.5 rounded text-xs font-bold border", canFuse ? `${cfg?.bg} ${cfg?.text} ${cfg?.border}` : "border-white/10 text-white/30")}>
+                  {have}/{cost}
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <div className={cn("flex-1 rounded-lg p-2 text-center border", cfg?.border, cfg?.bg)}>
+                  <p className={cn("text-lg font-serif font-bold", cfg?.text)}>{tier}</p>
+                  <p className="text-[10px] text-white/50">×{cost}</p>
+                </div>
+                <Sparkles className="w-4 h-4 text-rose-400 shrink-0" />
+                <div className={cn("flex-1 rounded-lg p-2 text-center border", nextCfg?.border, nextCfg?.bg)}>
+                  <p className={cn("text-lg font-serif font-bold", nextCfg?.text)}>{next}</p>
+                  <p className="text-[10px] text-white/50">×1</p>
+                </div>
+              </div>
+
+              <Button
+                onClick={() => canFuse && openPicker(tier)}
+                disabled={!canFuse}
+                className={cn(
+                  "w-full h-10 font-bold uppercase tracking-widest text-xs transition-all",
+                  canFuse
+                    ? "bg-rose-500/20 hover:bg-rose-500/40 text-rose-400 border border-rose-500/50 shadow-[0_0_14px_rgba(244,63,94,0.2)]"
+                    : "bg-white/5 text-white/20 border border-white/5 cursor-not-allowed"
+                )}
+              >
+                <Flame className="w-3 h-3 mr-2" />
+                {canFuse ? `Select Cards to Fuse` : `Need ${cost - have} more`}
+              </Button>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Result card */}
+      {result && (
+        <div className="glass-card rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-6 flex flex-col sm:flex-row items-center gap-6">
+          {result.imageUrl && (
+            <img
+              src={result.imageUrl}
+              alt={result.name}
+              className="w-32 h-44 object-cover rounded-lg border border-emerald-500/30 shrink-0 shadow-[0_0_24px_rgba(52,211,153,0.3)]"
+            />
+          )}
+          <div>
+            <p className="text-xs font-bold uppercase tracking-widest text-emerald-400 mb-1">⚗️ Fusion Result</p>
+            <h4 className="font-serif text-xl font-bold text-white">{result.name}</h4>
+            <p className={cn("text-sm font-bold mt-1", TIER_CONFIG[result.tier]?.text)}>
+              {result.tier} — {TIER_LABELS[result.tier] || result.tier}
+            </p>
+            <p className="text-xs text-white/40 font-mono mt-2">Copy ID: {result.copyId}</p>
+          </div>
+        </div>
+      )}
+
+      <p className="text-center text-xs text-white/25 font-mono">
+        You can also fuse via the bot: <span className="text-white/50">.fuse T1</span>
+      </p>
     </div>
   );
 }

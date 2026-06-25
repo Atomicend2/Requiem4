@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef, Component, type ReactNode } from "react";
 import { useToast } from "@/hooks/use-toast";
 import {
   Users, CreditCard, Shield, Wifi, WifiOff, Crown, Ban,
@@ -7,6 +7,34 @@ import {
   Star, Zap, RotateCcw, Download, Layers,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+
+/* ── Error boundary: catches React render crashes and shows a recovery UI ─── */
+class AdminErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state = { error: null };
+  static getDerivedStateFromError(e: Error) { return { error: e }; }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="min-h-screen flex items-center justify-center p-4">
+          <div className="glass-card rounded-xl p-8 max-w-md text-center border border-rose-500/30">
+            <div className="w-12 h-12 rounded-full bg-rose-500/10 flex items-center justify-center mx-auto mb-4">
+              <span className="text-rose-400 text-2xl">!</span>
+            </div>
+            <h2 className="font-serif text-xl text-white mb-2">Dashboard Error</h2>
+            <p className="text-muted-foreground text-sm mb-6 font-mono break-all">{(this.state.error as Error).message}</p>
+            <button
+              onClick={() => this.setState({ error: null })}
+              className="px-6 py-2 rounded border border-primary/30 text-primary text-sm font-bold uppercase tracking-widest hover:bg-primary/10 transition-colors"
+            >
+              Retry
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 const ADMIN_TOKEN_KEY = "requiem_order_admin_token";
 function getAdminToken(): string | null { return localStorage.getItem(ADMIN_TOKEN_KEY); }
@@ -83,7 +111,11 @@ export default function Admin() {
     );
   }
 
-  return <AdminDashboard token={token} base={base} onLogout={clearToken} toast={toast} />;
+  return (
+    <AdminErrorBoundary>
+      <AdminDashboard token={token} base={base} onLogout={clearToken} toast={toast} />
+    </AdminErrorBoundary>
+  );
 }
 
 type Tab = "overview" | "players" | "bots" | "cards" | "frames";
@@ -122,24 +154,49 @@ function AdminDashboard({ token, base, onLogout, toast }: {
 
   const fetchData = useCallback(async () => {
     setLoading(true); setError(null);
+    const controller = new AbortController();
+    const timeoutId  = setTimeout(() => controller.abort(), 15000);
     try {
       const [statsRes, botsRes] = await Promise.all([
-        fetch(`${base}/api/v1/admin/stats`, { headers: authHeader }),
-        fetch(`${base}/api/v1/admin/bots/status`, { headers: authHeader }),
+        fetch(`${base}/api/v1/admin/stats`,       { headers: authHeader, signal: controller.signal }),
+        fetch(`${base}/api/v1/admin/bots/status`, { headers: authHeader, signal: controller.signal }),
       ]);
+      clearTimeout(timeoutId);
       if (statsRes.status === 401 || statsRes.status === 403) { onLogout(); return; }
-      setData(await statsRes.json());
-      const botsJ = await botsRes.json();
-      if (botsJ.success) setBots(botsJ.bots || []);
-    } catch { setError("Could not reach admin API."); }
-    finally { setLoading(false); }
+      if (!statsRes.ok) {
+        if (statsRes.status >= 500) {
+          setData({
+            botConnected: false, pairingCode: null, isOwner: false,
+            stats: { totalUsers: 0, totalBots: 0, totalCards: 0, totalGuilds: 0, totalBanned: 0, totalStaff: 0 },
+            recentUsers: [], staffList: [], topUsers: [],
+            _warning: `Server error (${statsRes.status}) — database may be unavailable`,
+          });
+          try { const bj = await botsRes.json(); if (bj.success) setBots(Array.isArray(bj.bots) ? bj.bots : []); } catch {}
+          return;
+        }
+        let msg = `Server error (${statsRes.status})`;
+        try { const j = await statsRes.json(); msg = j.message || msg; } catch {}
+        setError(msg); return;
+      }
+      const statsJson = await statsRes.json();
+      if (!statsJson?.stats) { setError(statsJson?.message || "Unexpected response from admin API."); return; }
+      setData(statsJson);
+      try { const bj = await botsRes.json(); if (bj.success) setBots(Array.isArray(bj.bots) ? bj.bots : []); } catch {}
+    } catch (e: any) {
+      clearTimeout(timeoutId);
+      if (e?.name === "AbortError") {
+        setError("Request timed out. MongoDB may still be starting up — please wait a moment and retry.");
+      } else {
+        setError(e?.message || "Could not reach admin API. Is the server running?");
+      }
+    } finally { setLoading(false); }
   }, [token]);
 
   const fetchBotStatuses = useCallback(async () => {
     try {
       const r = await fetch(`${base}/api/v1/admin/bots/status`, { headers: authHeader });
       const j = await r.json();
-      if (j.success) setBots(j.bots || []);
+      if (j.success) setBots(Array.isArray(j.bots) ? j.bots : []);
     } catch {}
   }, [token]);
 
@@ -347,10 +404,10 @@ function AdminDashboard({ token, base, onLogout, toast }: {
         <div className="flex items-center gap-3 flex-wrap">
           <div className={cn(
             "px-3 py-1 rounded-full border text-xs font-bold uppercase tracking-widest flex items-center gap-1.5",
-            bots.some(b => b.status === "connected") ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-400" : "bg-rose-500/15 border-rose-500/30 text-rose-400"
+            (Array.isArray(bots) && bots.some(b => b.status === "connected")) ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-400" : "bg-rose-500/15 border-rose-500/30 text-rose-400"
           )}>
-            {bots.some(b => b.status === "connected") ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
-            {bots.filter(b => b.status === "connected").length}/{bots.length} Bot{bots.length !== 1 ? "s" : ""} Online
+            {Array.isArray(bots) && bots.some(b => b.status === "connected") ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
+            {Array.isArray(bots) ? bots.filter(b => b.status === "connected").length : 0}/{Array.isArray(bots) ? bots.length : 0} Bot{(!Array.isArray(bots) || bots.length !== 1) ? "s" : ""} Online
           </div>
           <button onClick={fetchData} className="px-3 py-1 rounded-full bg-primary/10 border border-primary/25 text-primary text-xs font-bold uppercase tracking-widest hover:bg-primary/20 transition-colors flex items-center gap-1.5">
             <RefreshCw className="w-3 h-3" /> Refresh
@@ -360,6 +417,14 @@ function AdminDashboard({ token, base, onLogout, toast }: {
           </button>
         </div>
       </div>
+
+      {/* Database warning banner */}
+      {data?._warning && (
+        <div className="flex items-center gap-3 px-4 py-3 rounded-xl border border-amber-500/30 bg-amber-500/5 text-amber-400 text-sm">
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          <span>{data._warning}. Set <code className="font-mono text-xs bg-black/30 px-1 rounded">MONGODB_URI</code> in Secrets to see live data.</span>
+        </div>
+      )}
 
       {/* Tabs */}
       <div className="flex gap-0 border-b border-white/5 overflow-x-auto">
@@ -699,7 +764,7 @@ function AdminDashboard({ token, base, onLogout, toast }: {
             ) : (
               <div className="space-y-4">
                 {bots.map((bot) => {
-                  const roles: string[] = (() => { try { return JSON.parse(bot.roles || "[]"); } catch { return []; } })();
+                  const roles: string[] = Array.isArray(bot.roles) ? bot.roles : [];
                   const hasOtp = roles.includes("otp");
                   const statusColor = bot.status === "connected" ? "emerald" : bot.status === "pairing" ? "amber" : bot.status === "connecting" ? "sky" : "rose";
                   const statusLabel = bot.status === "connected" ? "Connected" : bot.status === "pairing" ? "Pairing" : bot.status === "connecting" ? "Connecting…" : "Offline";

@@ -15,7 +15,7 @@
  *   ↓
  *   Media Downloader  ← by card._id, never by name/slug
  *   ↓
- *   SQLite Database
+ *   MongoDB Database
  *   ↓
  *   Web Dashboard  +  WhatsApp Bot  (both read from DB, never scrape Shoob)
  *
@@ -36,16 +36,11 @@
  *   png, jpg, jpeg, gif, webp, webm
  *
  * Pages: 1 → 2932 (15 cards per page, ~43 980 total)
- *
- * Deployment:
- *   NODE_PATH resolution: run from api-server root.
- *   Schedule: every 6 hours or once daily via cron / GitHub Actions.
- *   Env vars: DATA_DIR (where bot.db lives), optional SHOOB_START_PAGE.
  */
 
 import { chromium, type Browser, type Page } from "playwright";
 import sharp from "sharp";
-import { getDb } from "../bot/db/database.js";
+import { col } from "../bot/db/mongo.js";
 import { logger } from "../lib/logger.js";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -205,8 +200,8 @@ function buildMediaUrl(card: ShoobCard): { url: string; isWebm: boolean; isGif: 
   };
 }
 
-/** Generate a unique local card ID. */
-async function genCardId(db: any): Promise<string> {
+/** Generate a unique local card ID (MongoDB-safe). */
+async function genCardId(): Promise<string> {
   const { randomBytes } = await import("crypto");
   const CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
   for (let i = 0; i < 100; i++) {
@@ -214,7 +209,7 @@ async function genCardId(db: any): Promise<string> {
     const candidate = Array.from(bytes as unknown as number[])
       .map((b: number) => CHARS[b % CHARS.length])
       .join("");
-    if (!db.prepare("SELECT 1 FROM cards WHERE id = ?").get(candidate)) return candidate;
+    if (!(await col("cards").findOne({ _id: candidate }))) return candidate;
   }
   return "C" + Date.now().toString(36).toUpperCase();
 }
@@ -272,7 +267,6 @@ async function downloadMedia(
 // ── Core: process one page of cards ─────────────────────────────────────────
 
 async function processCards(
-  db: any,
   cards: ShoobCard[],
   syncOnly: boolean,
   uploader: string,
@@ -289,9 +283,7 @@ async function processCards(
 
     // ── Incremental mode: skip already-imported cards ─────────────────────
     if (syncOnly) {
-      const existing = db.prepare(
-        "SELECT local_card_id FROM shoob_imported_ids WHERE shoob_id = ?"
-      ).get(shoobId);
+      const existing = await col("shoob_imported_ids").findOne({ shoob_id: shoobId });
       if (existing) {
         stats.skipped++;
         continue;
@@ -313,10 +305,8 @@ async function processCards(
 
     const { url: mediaUrl, isWebm, isGif } = buildMediaUrl(card);
 
-    // ── Check if already in DB by shoob_id (index lookup) ─────────────────
-    const existingRow = db.prepare(
-      "SELECT id FROM cards WHERE shoob_id = ?"
-    ).get(shoobId) as any;
+    // ── Check if already in DB by shoob_id ────────────────────────────────
+    const existingRow = await col("cards").findOne({ shoob_id: shoobId });
 
     if (existingRow) {
       // Update metadata + raw_data. Re-download media only in full-pull mode.
@@ -327,23 +317,20 @@ async function processCards(
         await new Promise(r => setTimeout(r, MEDIA_DELAY_MS));
       }
 
-      db.prepare(`
-        UPDATE cards SET
-          name = ?, tier = ?, series = ?, is_animated = ?,
-          raw_data = ?, file_hash = ?, has_webm = ?, has_webp = ?, slug = ?,
-          source = 'shoob'
-          ${!syncOnly && imageData ? ", image_data = ?" : ""}
-        WHERE id = ?
-      `).run(
-        cardName, tier, series, animated,
-        rawJson, fileHash, hasWebm, hasWebp, slug,
-        ...(!syncOnly && imageData ? [imageData] : []),
-        existingRow.id,
-      );
+      const updateSet: any = {
+        name: cardName, tier, series, is_animated: animated,
+        raw_data: rawJson, file_hash: fileHash,
+        has_webm: hasWebm, has_webp: hasWebp, slug,
+        source: "shoob",
+      };
+      if (!syncOnly && imageData) updateSet.image_data = imageData;
 
-      db.prepare(
-        "INSERT OR IGNORE INTO shoob_imported_ids (shoob_id, local_card_id) VALUES (?, ?)"
-      ).run(shoobId, existingRow.id);
+      await col("cards").updateOne({ _id: existingRow._id }, { $set: updateSet });
+      await col("shoob_imported_ids").updateOne(
+        { shoob_id: shoobId },
+        { $setOnInsert: { shoob_id: shoobId, local_card_id: existingRow._id } },
+        { upsert: true }
+      );
 
       stats.updated++;
       continue;
@@ -351,38 +338,34 @@ async function processCards(
 
     // ── New card: download media then insert ───────────────────────────────
     let imageData: Buffer | null = null;
-    let isVideo = false;
     if (mediaUrl) {
       try {
         const dl = await downloadMedia(mediaUrl, isWebm, isGif);
-        if (dl) {
-          imageData = dl.buffer;
-          isVideo   = dl.isVideo;
-        }
+        if (dl) imageData = dl.buffer;
       } catch {
         stats.errors++;
       }
       await new Promise(r => setTimeout(r, MEDIA_DELAY_MS));
     }
 
-    const localId = await genCardId(db);
+    const localId = await genCardId();
 
     try {
-      db.prepare(`
-        INSERT INTO cards
-          (id, name, series, tier, image_data, is_animated,
-           uploaded_by, source, shoob_id,
-           raw_data, file_hash, has_webm, has_webp, slug)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'shoob', ?, ?, ?, ?, ?, ?)
-      `).run(
-        localId, cardName, series, tier, imageData, animated,
-        uploader, shoobId,
-        rawJson, fileHash, hasWebm, hasWebp, slug,
-      );
+      await col("cards").insertOne({
+        _id: localId, name: cardName, series, tier,
+        image_data: imageData,
+        is_animated: animated,
+        uploaded_by: uploader,
+        source: "shoob",
+        shoob_id: shoobId,
+        raw_data: rawJson,
+        file_hash: fileHash,
+        has_webm: hasWebm,
+        has_webp: hasWebp,
+        slug,
+      });
 
-      db.prepare(
-        "INSERT OR IGNORE INTO shoob_imported_ids (shoob_id, local_card_id) VALUES (?, ?)"
-      ).run(shoobId, localId);
+      await col("shoob_imported_ids").insertOne({ shoob_id: shoobId, local_card_id: localId });
 
       stats.imported++;
     } catch (err: any) {
@@ -400,7 +383,7 @@ export interface ScraperOptions {
   /** Bot phone / user identifier stored on new cards */
   uploader?: string;
   /** Called every 5 pages with a progress string */
-  onProgress?: (msg: string) => Promise<void> | void;
+  onProgress?: ((msg: string) => Promise<void> | void) | undefined;
   /** If set, start from this page (useful for resuming) */
   startPage?: number;
   /** If set, stop after this page */
@@ -421,10 +404,7 @@ export interface ScraperResult {
  * Main scraper entry point.
  *
  * Launches Playwright, navigates through every page of shoob.gg/cards,
- * extracts card data from React state, downloads media, and persists to DB.
- *
- * This is the ONLY correct way to get card data from Shoob — the REST API
- * is not public and may change; the React state is the source of truth.
+ * extracts card data from React state, downloads media, and persists to MongoDB.
  */
 export async function runPlaywrightScraper(opts: ScraperOptions = {}): Promise<ScraperResult> {
   const {
@@ -435,7 +415,6 @@ export async function runPlaywrightScraper(opts: ScraperOptions = {}): Promise<S
     maxPage   = MAX_PAGES,
   } = opts;
 
-  const db        = getDb();
   const startTime = Date.now();
   const stats     = { imported: 0, updated: 0, skipped: 0, errors: 0, totalSeen: 0, pagesScraped: 0 };
 
@@ -489,8 +468,6 @@ export async function runPlaywrightScraper(opts: ScraperOptions = {}): Promise<S
         await page.waitForSelector(".card-main", { timeout: REACT_TIMEOUT_MS });
       } catch {
         logger.warn({ pageNum }, ".card-main not found — may be last page or error");
-        // Could be the last page (no cards), or a transient error.
-        // Try the extraction anyway; if cards is empty/error we'll break.
       }
 
       // ── Execute React state extraction ────────────────────────────────────
@@ -498,12 +475,9 @@ export async function runPlaywrightScraper(opts: ScraperOptions = {}): Promise<S
 
       if (result.error) {
         logger.warn({ pageNum, error: result.error }, "React extraction error");
-        // If we get an error on the very first page, something is wrong structurally.
-        // If it's a later page, Shoob may have changed layout or we're past the last page.
         if (pageNum === startPage) {
           throw new Error(`React extraction failed on page ${pageNum}: ${result.error}`);
         }
-        // Otherwise assume we've reached the end
         logger.info({ pageNum }, "Assuming end of cards — stopping");
         break;
       }
@@ -520,7 +494,7 @@ export async function runPlaywrightScraper(opts: ScraperOptions = {}): Promise<S
       logger.info({ pageNum, cardCount: cards.length }, "Extracted cards from React state");
 
       // ── Process and persist cards ─────────────────────────────────────────
-      await processCards(db, cards, syncOnly, uploader, stats);
+      await processCards(cards, syncOnly, uploader, stats);
 
       // ── Progress update every 5 pages ────────────────────────────────────
       if (pageNum % 5 === 0 && onProgress) {
@@ -551,21 +525,17 @@ export async function runPlaywrightScraper(opts: ScraperOptions = {}): Promise<S
 
   // ── Log this run to shoob_sync_log ────────────────────────────────────────
   try {
-    db.prepare(`
-      INSERT INTO shoob_sync_log
-        (run_type, started_by, imported, updated, skipped, errors, total_seen, duration_ms, ran_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      syncOnly ? "playwright-incremental" : "playwright-full",
-      uploader,
-      stats.imported,
-      stats.updated,
-      stats.skipped,
-      stats.errors,
-      stats.totalSeen,
-      durationMs,
-      Math.floor(Date.now() / 1000),
-    );
+    await col("shoob_sync_log").insertOne({
+      run_type: syncOnly ? "playwright-incremental" : "playwright-full",
+      started_by: uploader,
+      imported: stats.imported,
+      updated: stats.updated,
+      skipped: stats.skipped,
+      errors: stats.errors,
+      total_seen: stats.totalSeen,
+      duration_ms: durationMs,
+      ran_at: Math.floor(Date.now() / 1000),
+    });
   } catch (logErr) {
     logger.warn({ logErr }, "Failed to write sync log");
   }

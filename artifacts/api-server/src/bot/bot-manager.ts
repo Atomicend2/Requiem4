@@ -1,17 +1,16 @@
 import {
   makeWASocket,
-  useMultiFileAuthState,
   DisconnectReason,
   makeCacheableSignalKeyStore,
   fetchLatestBaileysVersion,
 } from "@whiskeysockets/baileys";
-import { getDb } from "./db/database.js";
+import { col } from "./db/mongo.js";
+import { useMongoAuthState } from "./db/mongo-auth.js";
 import { logger } from "../lib/logger.js";
 import { setActiveSock } from "./connection.js";
 import { handleMessage } from "./handlers/message.js";
 import { handleGroupUpdate, handleGroupParticipantsUpdate } from "./handlers/group.js";
 import { DEFAULT_PERSONA, isValidPersona, type PersonaKey } from "./commands/personas.js";
-import fs from "fs";
 import Pino from "pino";
 
 export interface BotStatusInfo {
@@ -23,6 +22,8 @@ export interface BotStatusInfo {
   isPrimary: boolean;
   imageUrl: string;
   persona: PersonaKey;
+  roles: string[];
+  menuImageUrl: string;
 }
 
 interface LiveInstance {
@@ -32,10 +33,6 @@ interface LiveInstance {
 }
 
 const live = new Map<string, LiveInstance>();
-
-// Maps a live WASocket instance back to its bot row id, so message handlers
-// (which only receive the socket) can resolve which AI personality should
-// respond. See getPersonaForSock().
 const sockBotIds = new WeakMap<object, string>();
 
 export async function startBot(botId: string): Promise<void> {
@@ -44,14 +41,10 @@ export async function startBot(botId: string): Promise<void> {
     return;
   }
 
-  const db = getDb();
-  const row = db.prepare("SELECT * FROM bots WHERE id = ?").get(botId) as any;
+  const row = await col("bots").findOne({ _id: botId as any });
   if (!row) throw new Error(`Bot ${botId} not found`);
 
-  const authDir = row.auth_dir || `data/bots/${botId}/auth`;
-  fs.mkdirSync(authDir, { recursive: true });
-
-  const { state, saveCreds } = await useMultiFileAuthState(authDir);
+  const { state, saveCreds } = await useMongoAuthState(botId);
   let version: any;
   try {
     ({ version } = await fetchLatestBaileysVersion());
@@ -77,9 +70,8 @@ export async function startBot(botId: string): Promise<void> {
   const inst: LiveInstance = { sock, status: "connecting", pairingCode: null };
   live.set(botId, inst);
   sockBotIds.set(sock, botId);
-  db.prepare("UPDATE bots SET status = 'connecting' WHERE id = ?").run(botId);
+  await col("bots").updateOne({ _id: botId as any }, { $set: { status: "connecting" } });
 
-  // Prevent uncaught "error" events from crashing the process
   sock.ws?.on?.("error", (err: any) => {
     logger.warn({ err, botId }, "Managed bot socket error (handled)");
   });
@@ -89,7 +81,7 @@ export async function startBot(botId: string): Promise<void> {
     if (update.pairingCode) {
       inst.pairingCode = update.pairingCode;
       inst.status = "pairing";
-      db.prepare("UPDATE bots SET status = 'pairing' WHERE id = ?").run(botId);
+      await col("bots").updateOne({ _id: botId as any }, { $set: { status: "pairing" } });
       logger.info({ botId, code: update.pairingCode }, "Pairing code ready for managed bot");
     }
 
@@ -97,18 +89,16 @@ export async function startBot(botId: string): Promise<void> {
       inst.status = "connected";
       inst.pairingCode = null;
       const phone = sock.user?.id?.split("@")[0]?.split(":")[0] || row.phone;
-      db.prepare("UPDATE bots SET status = 'connected', phone = ? WHERE id = ?").run(phone, botId);
+      await col("bots").updateOne({ _id: botId as any }, { $set: { status: "connected", phone } });
       logger.info({ botId, name: row.name }, "Managed bot connected");
-      // Make this bot the active socket so all sendText/sendImage/sendMessage calls route through it
       setActiveSock(sock, true);
     }
 
     if (update.connection === "close") {
       const code = (update.lastDisconnect?.error as any)?.output?.statusCode;
       inst.status = "disconnected";
-      db.prepare("UPDATE bots SET status = 'disconnected' WHERE id = ?").run(botId);
+      await col("bots").updateOne({ _id: botId as any }, { $set: { status: "disconnected" } });
       logger.info({ botId, code }, "Managed bot disconnected");
-      // Clear the active sock override so we don't try to send through a dead socket
       setActiveSock(null, false);
       if (code !== DisconnectReason.loggedOut) {
         setTimeout(() => startBot(botId).catch(() => {}), 8000);
@@ -155,7 +145,7 @@ export async function startBot(botId: string): Promise<void> {
         const code = await sock.requestPairingCode(phoneDigits);
         inst.pairingCode = code;
         inst.status = "pairing";
-        db.prepare("UPDATE bots SET status = 'pairing' WHERE id = ?").run(botId);
+        await col("bots").updateOne({ _id: botId as any }, { $set: { status: "pairing" } });
         logger.info({ botId, code }, "Pairing code generated");
       }
     } catch (err) {
@@ -170,8 +160,7 @@ export async function stopBot(botId: string): Promise<void> {
   try { await inst.sock?.logout(); } catch {}
   inst.status = "disconnected";
   live.delete(botId);
-  const db = getDb();
-  db.prepare("UPDATE bots SET status = 'disconnected' WHERE id = ?").run(botId);
+  await col("bots").updateOne({ _id: botId as any }, { $set: { status: "disconnected" } });
 }
 
 export async function disconnectBot(botId: string): Promise<void> {
@@ -180,88 +169,75 @@ export async function disconnectBot(botId: string): Promise<void> {
   try { inst.sock?.end(undefined); } catch {}
   inst.status = "disconnected";
   live.delete(botId);
-  const db = getDb();
-  db.prepare("UPDATE bots SET status = 'disconnected' WHERE id = ?").run(botId);
+  await col("bots").updateOne({ _id: botId as any }, { $set: { status: "disconnected" } });
 }
 
-export function getAllBotsStatus(): BotStatusInfo[] {
-  const db = getDb();
-  const rows = db.prepare("SELECT * FROM bots ORDER BY is_primary DESC, created_at ASC").all() as any[];
+export async function getAllBotsStatus(): Promise<BotStatusInfo[]> {
+  const rows = await col("bots").find({}).sort({ is_primary: -1, created_at: 1 }).toArray();
   return rows.map((row) => {
-    const inst = live.get(row.id);
+    const inst = live.get(row._id as string);
+    const roles: string[] = Array.isArray(row.roles) ? row.roles : [];
     return {
-      id: row.id,
+      id: row._id as string,
       name: row.name,
       phone: row.phone || "",
       status: (inst?.status || row.status || "disconnected") as BotStatusInfo["status"],
       pairingCode: inst?.pairingCode || null,
       isPrimary: !!row.is_primary,
       imageUrl: row.menu_image_url || row.image_url || "",
+      menuImageUrl: row.menu_image_url || "",
       persona: isValidPersona(row.persona) ? row.persona : DEFAULT_PERSONA,
+      roles,
     };
   });
 }
 
-export function getBotStatusInfo(botId: string): BotStatusInfo | null {
-  const db = getDb();
-  const row = db.prepare("SELECT * FROM bots WHERE id = ?").get(botId) as any;
+export async function getBotStatusInfo(botId: string): Promise<BotStatusInfo | null> {
+  const row = await col("bots").findOne({ _id: botId as any });
   if (!row) return null;
   const inst = live.get(botId);
+  const roles: string[] = Array.isArray(row.roles) ? row.roles : [];
   return {
-    id: row.id,
+    id: row._id as string,
     name: row.name,
     phone: row.phone || "",
     status: (inst?.status || row.status || "disconnected") as BotStatusInfo["status"],
     pairingCode: inst?.pairingCode || null,
     isPrimary: !!row.is_primary,
     imageUrl: row.menu_image_url || row.image_url || "",
+    menuImageUrl: row.menu_image_url || "",
     persona: isValidPersona(row.persona) ? row.persona : DEFAULT_PERSONA,
+    roles,
   };
 }
 
-/**
- * Sets the AI companion personality for a managed bot.
- * See bot/commands/personas.ts for the full registry of available personas.
- */
-export function setBotPersona(botId: string, persona: PersonaKey): void {
-  const db = getDb();
-  db.prepare("UPDATE bots SET persona = ? WHERE id = ?").run(persona, botId);
+export async function setBotPersona(botId: string, persona: PersonaKey): Promise<void> {
+  await col("bots").updateOne({ _id: botId as any }, { $set: { persona } });
 }
 
-/**
- * Resolves the AI companion personality that should respond on a given
- * WhatsApp socket. Falls back to the primary bot's persona, then the
- * system default, if the socket isn't a managed multi-bot instance
- * (e.g. the legacy single-bot connection).
- */
-export function getPersonaForSock(sock: any): PersonaKey {
-  const db = getDb();
+export async function getPersonaForSock(sock: any): Promise<PersonaKey> {
   const botId = sockBotIds.get(sock);
   if (botId) {
-    const row = db.prepare("SELECT persona FROM bots WHERE id = ?").get(botId) as any;
+    const row = await col("bots").findOne({ _id: botId as any }, { projection: { persona: 1 } });
     if (row && isValidPersona(row.persona)) return row.persona;
   }
-  const primary = db.prepare("SELECT persona FROM bots WHERE is_primary = 1 LIMIT 1").get() as any;
+  const primary = await col("bots").findOne({ is_primary: 1 }, { projection: { persona: 1 } });
   if (primary && isValidPersona(primary.persona)) return primary.persona;
   return DEFAULT_PERSONA;
 }
 
 export async function requestBotPairingCode(botId: string, phone: string): Promise<string> {
-  const db = getDb();
-  const row = db.prepare("SELECT * FROM bots WHERE id = ?").get(botId) as any;
+  const row = await col("bots").findOne({ _id: botId as any });
   if (!row) throw new Error(`Bot ${botId} not found`);
 
   const phoneDigits = phone.replace(/\D/g, "");
   if (phoneDigits.length < 7) throw new Error("Invalid phone number");
 
-  // Save the phone for future reconnects
-  db.prepare("UPDATE bots SET phone = ? WHERE id = ?").run(phoneDigits, botId);
+  await col("bots").updateOne({ _id: botId as any }, { $set: { phone: phoneDigits } });
 
   const inst = live.get(botId);
   if (!inst || !inst.sock) {
-    // Start the bot first, then it will auto-request the pairing code
     await startBot(botId);
-    // Wait briefly then check
     await new Promise((r) => setTimeout(r, 4000));
     const updated = live.get(botId);
     if (updated?.pairingCode) return updated.pairingCode;
@@ -272,26 +248,24 @@ export async function requestBotPairingCode(botId: string, phone: string): Promi
     const code = await inst.sock.requestPairingCode(phoneDigits);
     inst.pairingCode = code;
     inst.status = "pairing";
-    db.prepare("UPDATE bots SET status = 'pairing' WHERE id = ?").run(botId);
+    await col("bots").updateOne({ _id: botId as any }, { $set: { status: "pairing" } });
     return code;
   } catch (err: any) {
     throw new Error(err?.message || "Failed to request pairing code");
   }
 }
 
-export function setPrimaryBot(botId: string): void {
-  const db = getDb();
-  db.prepare("UPDATE bots SET is_primary = 0").run();
-  db.prepare("UPDATE bots SET is_primary = 1 WHERE id = ?").run(botId);
+export async function setPrimaryBot(botId: string): Promise<void> {
+  await col("bots").updateMany({}, { $set: { is_primary: 0 } });
+  await col("bots").updateOne({ _id: botId as any }, { $set: { is_primary: 1 } });
 }
 
 export async function initManagedBots(): Promise<void> {
-  const db = getDb();
-  const rows = db.prepare("SELECT * FROM bots").all() as any[];
+  const rows = await col("bots").find({}).toArray();
   for (const row of rows) {
     if (row.is_primary || row.status === "connected") {
-      startBot(row.id).catch((err) =>
-        logger.warn({ err, id: row.id }, "Failed to auto-start managed bot")
+      startBot(row._id as string).catch((err) =>
+        logger.warn({ err, id: row._id }, "Failed to auto-start managed bot")
       );
     }
   }
