@@ -1,7 +1,7 @@
 import { Router, type Request, type Response, type NextFunction } from "express";
 import { randomBytes } from "crypto";
 import { requireAuth, type AuthRequest } from "./middleware.js";
-import { col } from "../../bot/db/mongo.js";
+import { col, ObjectId } from "../../bot/db/mongo.js";
 import { getSocket, isSocketConnected } from "../../bot/connection.js";
 import {
   startBot, stopBot, getAllBotsStatus, getBotStatusInfo, setPrimaryBot, requestBotPairingCode, setBotPersona,
@@ -77,7 +77,7 @@ async function isAdminToken(token: string): Promise<boolean> {
   return false;
 }
 
-function requireAdminAccess(req: Request, res: Response, next: NextFunction): void {
+export function requireAdminAccess(req: Request, res: Response, next: NextFunction): void {
   const authHeader = req.headers.authorization || "";
   const token = authHeader.replace(/^Bearer\s+/i, "").trim();
   (async () => {
@@ -226,7 +226,10 @@ router.get("/players/:id", requireAdminAccess as any, async (req, res) => {
 
     const [inventory, userCards, warnings, rpg, staffRow, bannedRow] = await Promise.all([
       col("inventory").find({ user_id: id }).toArray(),
-      col("user_cards").find({ user_id: id }).sort({ obtained_at: -1 }).limit(20).toArray(),
+      // No limit here — an admin reviewing a player's collection (e.g. to
+      // remove an illegitimately obtained card, or clear the whole
+      // collection) needs to see everything, not just the most recent 20.
+      col("user_cards").find({ user_id: id }).sort({ obtained_at: -1 }).toArray(),
       col("warnings").find({ user_id: id }).sort({ created_at: -1 }).limit(10).toArray(),
       col("rpg_characters").findOne({ user_id: id }),
       col("staff").findOne({ user_id: id }),
@@ -241,7 +244,12 @@ router.get("/players/:id", requireAdminAccess as any, async (req, res) => {
       success: true,
       player: { ...player, id: player._id, is_banned: bannedRow ? 1 : 0, staff_role: staffRow?.role || null },
       inventory,
-      cards: userCards.map((uc: any) => ({ uc_id: uc._id?.toString(), obtained_at: uc.obtained_at, ...cardMap.get(String(uc.card_id)) })),
+      cards: userCards.map((uc: any) => ({
+        uc_id: uc._id?.toString(),
+        copy_id: uc.copy_id,
+        obtained_at: uc.obtained_at,
+        ...cardMap.get(String(uc.card_id)),
+      })),
       warnings,
       rpg: rpg || {},
     });
@@ -316,6 +324,42 @@ router.post("/players/:id/clear-cooldowns", requireAdminAccess as any, async (re
     const id = decodeURIComponent(req.params.id);
     await col("users").updateOne({ _id: id as any }, { $set: { last_daily: 0, last_work: 0, last_dig: 0, last_fish: 0, last_beg: 0, last_gamble: 0, last_steal: 0 } });
     res.json({ success: true, message: "Cooldowns cleared." });
+  } catch (err: any) { res.status(500).json({ success: false, message: err.message }); }
+});
+
+// Remove one specific card copy from a player's collection — for cases
+// where a card was obtained illegitimately (exploit, duplication bug,
+// trading scam) and needs to be taken back without touching the rest of
+// their collection. Identified by uc_id (the user_cards document's own
+// _id), not copy_id, since uc_id is always unique per owned copy.
+router.delete("/players/:id/cards/:ucId", requireAdminAccess as any, async (req, res) => {
+  try {
+    const id = decodeURIComponent(req.params.id);
+    const ucId = req.params.ucId;
+    let oid: any;
+    try { oid = new ObjectId(ucId); } catch { res.status(400).json({ success: false, message: "Invalid card id." }); return; }
+
+    const row = await col("user_cards").findOne({ _id: oid, user_id: id });
+    if (!row) { res.status(404).json({ success: false, message: "Card not found in this player's collection." }); return; }
+
+    await col("card_deck").deleteMany({ user_card_id: ucId });
+    await col("user_cards").deleteOne({ _id: oid });
+    res.json({ success: true, message: "Card removed from player's collection." });
+  } catch (err: any) { res.status(500).json({ success: false, message: err.message }); }
+});
+
+// Clear a player's ENTIRE card collection. Destructive and irreversible —
+// the frontend should require explicit confirmation before calling this.
+router.delete("/players/:id/cards", requireAdminAccess as any, async (req, res) => {
+  try {
+    const id = decodeURIComponent(req.params.id);
+    const owned = await col("user_cards").find({ user_id: id }, { projection: { _id: 1 } }).toArray();
+    const ucIds = owned.map((d: any) => d._id?.toString());
+    if (ucIds.length > 0) {
+      await col("card_deck").deleteMany({ user_card_id: { $in: ucIds } });
+    }
+    const result = await col("user_cards").deleteMany({ user_id: id });
+    res.json({ success: true, message: `Removed ${result.deletedCount ?? 0} card(s) from player's collection.`, removed: result.deletedCount ?? 0 });
   } catch (err: any) { res.status(500).json({ success: false, message: err.message }); }
 });
 

@@ -709,7 +709,7 @@ export async function handleCards(ctx: CommandContext): Promise<void> {
       await sendText(from,
         `⚗️ *Card Fusion*\n\nSacrifice lower-tier duplicates to fuse a card of higher power!\n\n*Fusion Recipes:*\n` +
         Object.entries(FUSE_RECIPES).map(([t, r]) => `  ${getTierEmoji(t)} ${r.cost}× ${t} → 1× ${r.next}`).join("\n") +
-        `\n\nUsage: *.fuse <tier>*\nExample: *.fuse T1*`
+        `\n\nUsage: *.fuse <tier>* to see your eligible cards and pick exactly which ones to sacrifice.\nExample: *.fuse T1*`
       );
       return;
     }
@@ -720,20 +720,83 @@ export async function handleCards(ctx: CommandContext): Promise<void> {
       await sendText(from, `❌ *Not enough cards!*\n\nYou need *${recipe.cost}× ${tierArg}* cards to fuse a ${recipe.next}.\nYou currently have *${eligible.length}* eligible ${tierArg} cards (non-lent).`);
       return;
     }
-    const nextTierCards = await col("cards").aggregate([
-      { $match: { tier: recipe.next } },
-      { $sample: { size: 1 } },
-      { $project: { _id: 1, name: 1, tier: 1 } },
-    ]).toArray();
+
+    // Pull out an optional trailing "as <card name>" before parsing copy IDs,
+    // so those tokens are never mistaken for copy IDs.
+    const restArgs = args.slice(1);
+    const asIdx = restArgs.findIndex((a) => a.toLowerCase() === "as");
+    const wantedTargetName = asIdx !== -1 ? restArgs.slice(asIdx + 1).join(" ").trim() : null;
+    const copyIdArgs = asIdx !== -1 ? restArgs.slice(0, asIdx) : restArgs;
+
+    // Player must explicitly list which copy_ids to sacrifice — never an
+    // automatic pick. This protects a player's favorite/notable copy (e.g.
+    // a rare variant) from being burned just because it happened to load
+    // first when the collection was fetched.
+    const selectedCopyIds = copyIdArgs.map((a) => a.trim()).filter(Boolean);
+
+    if (selectedCopyIds.length === 0) {
+      const list = eligible.map((c: any) => `\`${c.copy_id}\` — ${c.name}`).join("\n");
+      await sendText(from,
+        `⚗️ *Fuse ${recipe.cost}× ${tierArg} → 1× ${recipe.next}*\n\n` +
+        `Pick exactly *${recipe.cost}* copy IDs from your ${tierArg} cards below:\n\n${list}\n\n` +
+        `Usage: *.fuse ${tierArg} <copy_id1> <copy_id2> ...* (${recipe.cost} total)`
+      );
+      return;
+    }
+
+    if (selectedCopyIds.length !== recipe.cost) {
+      await sendText(from, `❌ You need to select exactly *${recipe.cost}* copy IDs (you gave ${selectedCopyIds.length}). Run *.fuse ${tierArg}* with no copy IDs to see the list again.`);
+      return;
+    }
+
+    const eligibleByCopyId = new Map(eligible.map((c: any) => [String(c.copy_id), c]));
+    const invalidIds = selectedCopyIds.filter((id) => !eligibleByCopyId.has(id));
+    if (invalidIds.length > 0) {
+      await sendText(from, `❌ These copy IDs aren't valid eligible *${tierArg}* cards of yours: ${invalidIds.map((i) => `\`${i}\``).join(", ")}`);
+      return;
+    }
+    const uniqueIds = new Set(selectedCopyIds);
+    if (uniqueIds.size !== selectedCopyIds.length) {
+      await sendText(from, `❌ You listed the same copy ID more than once.`);
+      return;
+    }
+
+    // Let the player choose which specific target card they receive, when
+    // more than one exists at the destination tier — fusion should never
+    // hand back an unpredictable random card.
+    const nextTierCards = await col("cards").find({ tier: recipe.next }).project({ _id: 1, name: 1, series: 1, tier: 1 }).limit(50).toArray();
     if (nextTierCards.length === 0) { await sendText(from, `❌ No ${recipe.next} cards exist in the database yet. Check back later!`); return; }
-    const nextCard = nextTierCards[0];
-    const toDelete = eligible.slice(0, recipe.cost);
+
+    let chosenTarget: any = null;
+    if (wantedTargetName) {
+      const wantedLower = wantedTargetName.toLowerCase();
+      chosenTarget = nextTierCards.find((c: any) => c.name.toLowerCase().includes(wantedLower));
+      if (!chosenTarget) {
+        const options = nextTierCards.slice(0, 20).map((c: any) => `• ${c.name}${c.series ? ` (${c.series})` : ""}`).join("\n");
+        await sendText(from, `❌ No *${recipe.next}* card matching "${wantedTargetName}" found. Available options:\n${options}${nextTierCards.length > 20 ? `\n...and ${nextTierCards.length - 20} more` : ""}`);
+        return;
+      }
+    } else if (nextTierCards.length > 1) {
+      const options = nextTierCards.slice(0, 20).map((c: any) => `• ${c.name}${c.series ? ` (${c.series})` : ""}`).join("\n");
+      await sendText(from,
+        `⚗️ Multiple *${recipe.next}* cards are possible. Add *as <card name>* to choose exactly which one you receive:\n\n${options}` +
+        `${nextTierCards.length > 20 ? `\n...and ${nextTierCards.length - 20} more` : ""}\n\n` +
+        `Example: *.fuse ${tierArg} ${selectedCopyIds.join(" ")} as ${nextTierCards[0].name}*`
+      );
+      return;
+    } else {
+      chosenTarget = nextTierCards[0];
+    }
+
+    const toDelete = selectedCopyIds.map((id) => eligibleByCopyId.get(id));
     for (const uc of toDelete) { await deleteUserCardByCopyId(String(uc.copy_id), userId); }
-    const newCopyRowId = await giveCard(userId, String(nextCard._id));
+    const newCopyRowId = await giveCard(userId, String(chosenTarget._id));
     const newCopyRow = newCopyRowId ? await col("user_cards").findOne({ _id: newCopyRowId as any }) : null;
     const copyIdDisplay = (newCopyRow as any)?.copy_id || "—";
     await sendText(from,
-      `⚗️ *Fusion Successful!*\n\nBurned *${recipe.cost}× ${getTierEmoji(tierArg)} ${tierArg}* cards\n→ Fused: *${getTierEmoji(recipe.next)} ${nextCard.name}* (${recipe.next})\n📋 Copy ID: \`${copyIdDisplay}\`\n\nType *.cards* to see your collection!`
+      `⚗️ *Fusion Successful!*\n\nBurned *${recipe.cost}× ${getTierEmoji(tierArg)} ${tierArg}* cards:\n` +
+      toDelete.map((c: any) => `  • ${c.name} (\`${c.copy_id}\`)`).join("\n") +
+      `\n\n→ Fused: *${getTierEmoji(recipe.next)} ${chosenTarget.name}* (${recipe.next})\n📋 Copy ID: \`${copyIdDisplay}\`\n\nType *.cards* to see your collection!`
     );
     return;
   }

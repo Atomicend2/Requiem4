@@ -464,6 +464,7 @@ router.post("/fuse", requireAuth, async (req: AuthRequest, res) => {
     const body = req.body as any;
     const tierArg = (body?.tier || "").toUpperCase();
     const selectedCardIds: string[] | undefined = Array.isArray(body?.cardIds) ? body.cardIds : undefined;
+    const targetCardId: string | undefined = body?.targetCardId ? String(body.targetCardId) : undefined;
 
     const recipe = FUSE_RECIPES[tierArg];
     if (!recipe) {
@@ -509,15 +510,32 @@ router.post("/fuse", requireAuth, async (req: AuthRequest, res) => {
       toDelete = eligible.slice(0, recipe.cost);
     }
 
-    // Pick a random next-tier card
-    const nextCards = await col("cards").aggregate([
-      { $match: { tier: recipe.next } },
-      { $sample: { size: 1 } },
-    ]).toArray();
-    const nextCard = nextCards[0];
-
-    if (!nextCard) {
+    // Let the player choose exactly which next-tier card they receive,
+    // instead of a random draw. If there's only one possible result, that's
+    // used automatically; otherwise the frontend must pass targetCardId,
+    // and gets the full option list back to choose from if it hasn't yet.
+    const nextCards = await col("cards").find({ tier: recipe.next }).project({ _id: 1, name: 1, series: 1, tier: 1, image_url: 1, shoob_id: 1, mazoku_id: 1, has_webm: 1 }).limit(100).toArray();
+    if (nextCards.length === 0) {
       res.status(500).json({ success: false, message: `No ${recipe.next} cards exist in the database yet.` });
+      return;
+    }
+
+    let nextCard: any;
+    if (targetCardId) {
+      nextCard = nextCards.find((c: any) => String(c._id) === targetCardId);
+      if (!nextCard) {
+        res.status(400).json({ success: false, message: "Selected target card is not a valid option for this fusion." });
+        return;
+      }
+    } else if (nextCards.length === 1) {
+      nextCard = nextCards[0];
+    } else {
+      res.status(409).json({
+        success: false,
+        needsTargetSelection: true,
+        message: `Multiple ${recipe.next} cards are possible — choose which one you want.`,
+        options: nextCards.map((c: any) => ({ id: String(c._id), name: c.name, series: c.series, tier: c.tier })),
+      });
       return;
     }
 

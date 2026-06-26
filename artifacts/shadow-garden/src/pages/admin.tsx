@@ -278,6 +278,34 @@ function AdminDashboard({ token, base, onLogout, toast }: {
     } finally { setActionPending(false); }
   };
 
+  const deleteCard = async (ucId: string, cardName: string) => {
+    if (!selectedPlayer) return;
+    if (!window.confirm(`Remove "${cardName}" from ${selectedPlayer.name || "this player"}'s collection? This cannot be undone.`)) return;
+    setActionPending(true);
+    try {
+      const r = await fetch(`${base}/api/v1/admin/players/${encodeURIComponent(selectedPlayer.id)}/cards/${ucId}`, {
+        method: "DELETE", headers: { ...authHeader },
+      });
+      const j = await r.json();
+      toast({ title: j.success ? "Card Removed" : "Error", description: j.message });
+      if (j.success) await loadPlayerDetail(selectedPlayer.id);
+    } finally { setActionPending(false); }
+  };
+
+  const clearAllCards = async () => {
+    if (!selectedPlayer) return;
+    if (!window.confirm(`Clear ${selectedPlayer.name || "this player"}'s ENTIRE card collection? This is irreversible.`)) return;
+    setActionPending(true);
+    try {
+      const r = await fetch(`${base}/api/v1/admin/players/${encodeURIComponent(selectedPlayer.id)}/cards`, {
+        method: "DELETE", headers: { ...authHeader },
+      });
+      const j = await r.json();
+      toast({ title: j.success ? "Collection Cleared" : "Error", description: j.message });
+      if (j.success) await loadPlayerDetail(selectedPlayer.id);
+    } finally { setActionPending(false); }
+  };
+
   const requestPairingCode = async (botId: string) => {
     const phone = pairingPhones[botId]?.trim();
     if (!phone) { toast({ title: "Error", description: "Enter a phone number first." }); return; }
@@ -434,7 +462,7 @@ function AdminDashboard({ token, base, onLogout, toast }: {
               "px-5 py-2.5 text-sm font-bold uppercase tracking-widest border-b-2 -mb-px transition-colors whitespace-nowrap",
               activeTab === tab ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-white"
             )}>
-            {tab === "overview" ? "Overview" : tab === "players" ? "Players" : tab === "bots" ? "Bot Manager" : tab === "frames" ? "Frames" : "Cards"}
+            {tab === "overview" ? "Overview" : tab === "players" ? "Players" : tab === "bots" ? "Bot Manager" : tab === "frames" ? "Frames" : "Card Sync"}
           </button>
         ))}
       </div>
@@ -649,16 +677,46 @@ function AdminDashboard({ token, base, onLogout, toast }: {
                     </div>
                   )}
 
-                  {/* Cards + Inventory quick view */}
+                  {/* Cards — full list with per-card removal */}
+                  {playerDetail && (
+                    <div className="bg-black/20 rounded-lg p-3 border border-white/5">
+                      <div className="flex items-center justify-between mb-2">
+                        <p className="text-[10px] uppercase tracking-widest text-muted-foreground">Cards ({playerDetail.cards?.length || 0})</p>
+                        {playerDetail.cards?.length > 0 && (
+                          <button onClick={clearAllCards} disabled={actionPending}
+                            className="text-[10px] uppercase tracking-widest font-bold text-rose-400 hover:text-rose-300 disabled:opacity-50">
+                            Clear All
+                          </button>
+                        )}
+                      </div>
+                      <div className="max-h-64 overflow-y-auto custom-scroll space-y-1">
+                        {playerDetail.cards?.map((c: any) => (
+                          <div key={c.uc_id} className="flex items-center justify-between gap-2 text-xs bg-black/20 rounded px-2 py-1.5 border border-white/5">
+                            <p className="text-white/80 truncate">
+                              {c.name || "Unknown card"} <span className="text-primary/60">[{c.tier || "?"}]</span>
+                              {c.series && <span className="text-muted-foreground/60"> · {c.series}</span>}
+                            </p>
+                            <button onClick={() => deleteCard(c.uc_id, c.name || "this card")} disabled={actionPending}
+                              className="shrink-0 p-1 rounded text-muted-foreground hover:text-rose-400 transition-colors disabled:opacity-50" title="Remove this card">
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        ))}
+                        {!playerDetail.cards?.length && <p className="text-muted-foreground/60 text-xs">None</p>}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Inventory + Warnings quick view */}
                   {playerDetail && (
                     <div className="grid grid-cols-2 gap-3 text-xs text-muted-foreground">
                       <div className="bg-black/20 rounded-lg p-3 border border-white/5">
-                        <p className="text-[10px] uppercase tracking-widest mb-1">Cards ({playerDetail.cards?.length || 0})</p>
-                        {playerDetail.cards?.slice(0, 3).map((c: any) => (
-                          <p key={c.uc_id} className="text-white/70 truncate">{c.name} <span className="text-primary/60">[{c.tier}]</span></p>
+                        <p className="text-[10px] uppercase tracking-widest mb-1">Inventory ({playerDetail.inventory?.length || 0})</p>
+                        {playerDetail.inventory?.slice(0, 3).map((i: any, idx: number) => (
+                          <p key={idx} className="text-white/70 truncate">{i.item} <span className="text-primary/60">×{i.quantity}</span></p>
                         ))}
-                        {playerDetail.cards?.length > 3 && <p className="text-primary/50">+{playerDetail.cards.length - 3} more</p>}
-                        {!playerDetail.cards?.length && <p className="text-muted-foreground/60">None</p>}
+                        {playerDetail.inventory?.length > 3 && <p className="text-primary/50">+{playerDetail.inventory.length - 3} more</p>}
+                        {!playerDetail.inventory?.length && <p className="text-muted-foreground/60">None</p>}
                       </div>
                       <div className="bg-black/20 rounded-lg p-3 border border-white/5">
                         <p className="text-[10px] uppercase tracking-widest mb-1">Warnings ({playerDetail.warnings?.length || 0})</p>
@@ -888,7 +946,7 @@ function AdminDashboard({ token, base, onLogout, toast }: {
       {/* ── CARDS TAB ── */}
       {activeTab === "cards" && (
         <div className="space-y-6">
-          <CardImportPanel />
+          <CardSyncPanel />
         </div>
       )}
 
@@ -949,7 +1007,7 @@ function AdminFramesPanel({ token, base, toast }: { token: string; base: string;
     } finally { setUploading(false); }
   };
 
-  const deleteFrame = async (id: number, name: string) => {
+  const deleteFrame = async (id: string, name: string) => {
     if (!window.confirm(`Delete frame "${name}"?`)) return;
     try {
       const res = await fetch(`${base}/api/v1/frames/${id}`, { method: "DELETE", headers: authHeader });
@@ -1033,6 +1091,7 @@ function AdminFramesPanel({ token, base, toast }: { token: string; base: string;
                     alt={frame.name}
                     className="w-full h-full object-contain"
                     loading="lazy"
+                    onError={(e) => { (e.target as HTMLImageElement).style.visibility = "hidden"; }}
                   />
                 </div>
                 <div className="text-center flex-1">
@@ -1040,10 +1099,12 @@ function AdminFramesPanel({ token, base, toast }: { token: string; base: string;
                   <p className="text-[10px] text-muted-foreground uppercase tracking-wider mt-0.5">{frame.theme}</p>
                   <p className="text-[10px] text-muted-foreground mt-0.5">ID: #{frame.id}</p>
                   {frame.isSystem && (
-                    <span className="text-[9px] uppercase tracking-widest px-1.5 py-0.5 rounded border border-primary/30 text-primary bg-primary/10 font-bold mt-1 inline-block">System</span>
+                    <span className="text-[9px] uppercase tracking-widest px-1.5 py-0.5 rounded border border-primary/30 text-primary bg-primary/10 font-bold mt-1 inline-block">
+                      {frame.isProtected ? "Default" : "Bulk Import"}
+                    </span>
                   )}
                 </div>
-                {!frame.isSystem && (
+                {!frame.isProtected && (
                   <button
                     onClick={() => deleteFrame(frame.id, frame.name)}
                     className="absolute top-2 right-2 p-1 rounded-md text-rose-400 opacity-0 group-hover:opacity-100 hover:bg-rose-500/10 transition-all"
@@ -1065,308 +1126,105 @@ function AdminFramesPanel({ token, base, toast }: { token: string; base: string;
 }
 
 
-function CardImportPanel() {
+function CardSyncPanel() {
   const { toast } = useToast();
   const token = getAdminToken();
-
-  // ── Import form state ──────────────────────────────────────────────────
-  const [importMode, setImportMode] = useState<"anime" | "tier" | "full" | "sync">("anime");
-  const [tier, setTier] = useState("T3");
-  const [anime, setAnime] = useState("");
-  const [series, setSeries] = useState("");
-  const [limit, setLimit] = useState("20");
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<any>(null);
-
-  // ── Scraper state ──────────────────────────────────────────────────────
-  const [scraperStatus, setScraperStatus] = useState<any>(null);
-  const [scraperHistory, setScraperHistory] = useState<any[]>([]);
-  const [scraperLoading, setScraperLoading] = useState(false);
-  const [runLoading, setRunLoading] = useState(false);
-
-  const VALID_TIERS = ["T1","T2","T3","T4","T5","T6"];
+  const [syncing, setSyncing] = useState(false);
+  const [lastResult, setLastResult] = useState<any>(null);
+  const [dbCount, setDbCount] = useState<number | null>(null);
+  const [eventCount, setEventCount] = useState<number | null>(null);
+  const [countLoading, setCountLoading] = useState(false);
 
   const authHeader = token ? { Authorization: `Bearer ${token}` } : {};
 
-  const fetchScraperStatus = async () => {
-    setScraperLoading(true);
+  const fetchCount = async () => {
+    setCountLoading(true);
     try {
-      const res = await fetch("/api/v1/cards/scraper/status", { headers: { ...authHeader } });
-      const j = await res.json();
-      setScraperStatus(j);
-      const hRes = await fetch("/api/v1/cards/scraper/history", { headers: { ...authHeader } });
-      const hj = await hRes.json();
-      setScraperHistory(Array.isArray(hj) ? hj : (hj.data || hj.history || []));
-    } catch (e: any) {
-      toast({ title: "Scraper Error", description: e?.message || "Failed to fetch status", variant: "destructive" });
+      const [cardsRes, eventsRes] = await Promise.all([
+        fetch("/api/v1/cards/from-json?limit=1"),
+        fetch("/api/events?limit=1"),
+      ]);
+      const cardsJ = await cardsRes.json();
+      const eventsJ = await eventsRes.json();
+      setDbCount(typeof cardsJ.total === "number" ? cardsJ.total : null);
+      setEventCount(typeof eventsJ.count === "number" ? eventsJ.count : null);
+    } catch {
+      setDbCount(null);
+      setEventCount(null);
     } finally {
-      setScraperLoading(false);
+      setCountLoading(false);
     }
   };
 
-  const triggerScraperRun = async () => {
-    setRunLoading(true);
+  useEffect(() => { fetchCount(); }, []);
+
+  const handleSync = async () => {
+    setSyncing(true);
+    setLastResult(null);
     try {
-      const res = await fetch("/api/v1/cards/scraper/run", { method: "POST", headers: { ...authHeader } });
-      const j = await res.json();
-      toast({ title: j.success !== false ? "✅ Scraper Triggered" : "❌ Failed", description: j.message || "Scraper run initiated." });
-      setTimeout(fetchScraperStatus, 2000);
-    } catch (e: any) {
-      toast({ title: "Error", description: e?.message || "Failed to trigger scraper", variant: "destructive" });
-    } finally {
-      setRunLoading(false);
-    }
-  };
-
-  const handleImport = async () => {
-    setLoading(true);
-    setResult(null);
-    try {
-      // full/sync modes use the scraper/run endpoint
-      if (importMode === "full" || importMode === "sync") {
-        const res = await fetch("/api/v1/cards/scraper/run", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...authHeader },
-          body: JSON.stringify({ mode: importMode === "full" ? "full" : "incremental" }),
-        });
-        const j = await res.json();
-        setResult(j);
-        toast({
-          title: j.success ? "✅ Sync Complete" : "❌ Sync Failed",
-          description: j.message,
-          variant: j.success ? undefined : "destructive",
-        });
-        return;
-      }
-
-      // anime/tier modes use fetch-cards endpoint
-      const body: any = { limit: parseInt(limit, 10) || 20 };
-      if (importMode === "tier") {
-        body.tier = tier;
-        if (series.trim()) body.series = series.trim();
-      } else {
-        // anime mode
-        body.anime = anime.trim();
-        if (tier) body.tier = tier;
-        if (series.trim()) body.series = series.trim();
-      }
-
-      const res = await fetch("/api/v1/cards/fetch-cards", {
+      const res = await fetch("/api/v1/cards/reload-from-json", {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...authHeader },
-        body: JSON.stringify(body),
+        headers: { ...authHeader },
       });
       const j = await res.json();
-      setResult(j);
+      setLastResult(j);
       toast({
-        title: j.success ? "✅ Import Complete" : "❌ Import Failed",
-        description: j.message,
+        title: j.success ? "✅ Sync Complete" : "❌ Sync Failed",
+        description: j.success
+          ? `Imported ${j.imported ?? 0}, updated ${j.updated ?? 0}, skipped ${j.skipped ?? 0}.`
+          : (j.message || "Reload failed."),
         variant: j.success ? undefined : "destructive",
       });
+      if (j.success) fetchCount();
     } catch (e: any) {
       toast({ title: "Error", description: e?.message || "Request failed", variant: "destructive" });
     } finally {
-      setLoading(false);
+      setSyncing(false);
     }
   };
 
   return (
     <div className="space-y-6">
-      {/* ── Import Panel ───────────────────────────────────────────────── */}
       <section className="glass-card rounded-xl p-6 border border-white/8">
         <h2 className="font-serif text-xl font-bold text-white mb-1 flex items-center gap-2">
-          <Download className="w-5 h-5 text-primary/70" /> Import Cards — Shoob.gg
+          <Download className="w-5 h-5 text-primary/70" /> Card Database Sync
         </h2>
         <p className="text-muted-foreground text-sm mb-6">
-          Fetch card data directly from Shoob.gg. Images and animated media are downloaded and stored locally in the database.
+          Cards are managed by editing <code className="text-primary/80">cards.json</code> / <code className="text-primary/80">mazoku_cards.json</code> and
+          running <code className="text-primary/80">merge_cards.js</code> to regenerate <code className="text-primary/80">unified_cards.jsonl</code>. Pushing
+          that file to the server does NOT update the live database by itself — the server only re-reads it automatically on a fresh boot. Use this button
+          to re-sync the database immediately after a deploy, without waiting for or forcing a restart.
         </p>
 
-        {/* Mode tabs */}
-        <div className="flex gap-2 mb-5 flex-wrap">
-          {(["anime","tier","sync","full"] as const).map((m) => (
-            <button key={m} onClick={() => setImportMode(m)}
-              className={cn(
-                "px-4 py-1.5 rounded-lg border text-xs font-bold uppercase tracking-wider transition-colors",
-                importMode === m
-                  ? "bg-primary/20 border-primary/50 text-primary"
-                  : "bg-black/20 border-white/10 text-muted-foreground hover:border-white/20"
-              )}>
-              {m === "anime" ? "By Anime" : m === "tier" ? "By Tier" : m === "sync" ? "Incremental Sync" : "Full Import"}
-            </button>
-          ))}
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-5">
-          {/* Anime mode */}
-          {importMode === "anime" && (
-            <>
-              <div>
-                <label className="text-xs uppercase tracking-widest text-muted-foreground mb-1.5 block">Anime / Character Name</label>
-                <input type="text" value={anime} onChange={(e) => setAnime(e.target.value)} placeholder="e.g. Naruto, One Piece"
-                  className="w-full px-3 py-2.5 bg-black/30 border border-white/10 rounded-lg text-white text-sm focus:outline-none focus:border-primary/50 placeholder:text-muted-foreground" />
-              </div>
-              <div>
-                <label className="text-xs uppercase tracking-widest text-muted-foreground mb-1.5 block">Tier (optional)</label>
-                <select value={tier} onChange={(e) => setTier(e.target.value)}
-                  className="w-full px-3 py-2.5 bg-black/30 border border-white/10 rounded-lg text-white text-sm focus:outline-none focus:border-primary/50">
-                  <option value="">All Tiers</option>
-                  {VALID_TIERS.map((t) => <option key={t} value={t}>{t}</option>)}
-                </select>
-              </div>
-            </>
-          )}
-
-          {/* Tier mode */}
-          {importMode === "tier" && (
-            <div>
-              <label className="text-xs uppercase tracking-widest text-muted-foreground mb-1.5 block">Tier</label>
-              <select value={tier} onChange={(e) => setTier(e.target.value)}
-                className="w-full px-3 py-2.5 bg-black/30 border border-white/10 rounded-lg text-white text-sm focus:outline-none focus:border-primary/50">
-                {VALID_TIERS.map((t) => <option key={t} value={t}>{t}</option>)}
-              </select>
-            </div>
-          )}
-
-          {/* Sync / Full mode info */}
-          {(importMode === "sync" || importMode === "full") && (
-            <div className="col-span-full bg-black/20 rounded-lg p-4 border border-white/8 text-sm text-muted-foreground">
-              {importMode === "sync"
-                ? "🔄 Incremental sync — only imports cards not yet in your database. Faster and safe to run often."
-                : "📦 Full import — pulls ALL pages from Shoob.gg, re-downloads images, and refreshes metadata. May take several minutes."}
-            </div>
-          )}
-
-          {/* Series override (anime/tier modes only) */}
-          {(importMode === "anime" || importMode === "tier") && (
-            <div>
-              <label className="text-xs uppercase tracking-widest text-muted-foreground mb-1.5 block">Series Override (optional)</label>
-              <input type="text" value={series} onChange={(e) => setSeries(e.target.value)} placeholder="Leave blank to use Shoob value"
-                className="w-full px-3 py-2.5 bg-black/30 border border-white/10 rounded-lg text-white text-sm focus:outline-none focus:border-primary/50 placeholder:text-muted-foreground" />
-            </div>
-          )}
-
-          {/* Limit (anime/tier modes only) */}
-          {(importMode === "anime" || importMode === "tier") && (
-            <div>
-              <label className="text-xs uppercase tracking-widest text-muted-foreground mb-1.5 block">Limit (max 200)</label>
-              <input type="number" value={limit} onChange={(e) => setLimit(e.target.value)} min={1} max={200}
-                className="w-full px-3 py-2.5 bg-black/30 border border-white/10 rounded-lg text-white text-sm focus:outline-none focus:border-primary/50" />
-            </div>
-          )}
-        </div>
-
-        <button onClick={handleImport} disabled={loading || (importMode === "anime" && !anime.trim())}
-          className="px-6 py-2.5 rounded-lg bg-primary/20 border border-primary/40 text-primary font-bold uppercase tracking-widest text-sm hover:bg-primary/30 transition-colors disabled:opacity-50 flex items-center gap-2">
-          {loading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-          {loading
-            ? (importMode === "sync" || importMode === "full") ? "Syncing…" : "Importing…"
-            : (importMode === "sync") ? "Run Incremental Sync" : (importMode === "full") ? "Run Full Import" : "Fetch & Import"}
-        </button>
-
-        {result && (
-          <div className={cn(
-            "mt-5 rounded-lg p-4 border text-sm",
-            result.success ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300" : "bg-rose-500/10 border-rose-500/30 text-rose-300"
-          )}>
-            <p className="font-bold mb-1">{result.success ? "✅ Done" : "❌ Failed"}</p>
-            <p>{result.message}</p>
-            {result.success && (
-              <div className="mt-2 flex gap-4 text-xs">
-                <span>🎴 Imported: <strong>{result.imported}</strong></span>
-                <span>⏭️ Skipped: <strong>{result.skipped}</strong></span>
-                <span>📊 Available: <strong>{result.total_available}</strong></span>
-              </div>
-            )}
-            {result.errors?.length > 0 && (
-              <div className="mt-2 text-xs text-rose-400">
-                <p className="font-semibold mb-1">Media errors:</p>
-                {result.errors.map((e: string, i: number) => <p key={i} className="font-mono">• {e}</p>)}
-              </div>
-            )}
+        <div className="flex items-center gap-4 mb-6">
+          <div className="glass-card rounded-lg px-4 py-3 border border-white/8">
+            <p className="text-[10px] uppercase tracking-widest text-muted-foreground mb-1">Cards currently in database</p>
+            <p className="text-2xl font-bold text-white">
+              {countLoading ? "…" : dbCount !== null ? dbCount.toLocaleString() : "Unknown"}
+            </p>
           </div>
-        )}
-
-        <div className="mt-6 p-4 rounded-lg bg-black/20 border border-white/5 text-xs text-muted-foreground space-y-1">
-          <p className="font-bold text-white/60 uppercase tracking-wider mb-2">Bot Commands</p>
-          <p><code className="text-rose-300">.pullcards</code> — full Shoob import (all pages, re-downloads images)</p>
-          <p><code className="text-rose-300">.synccards</code> — incremental sync (new cards only)</p>
-          <p><code className="text-rose-300">.cardlogs</code> — show recent sync statistics</p>
-          <p className="pt-1">TS/TX/TZ cards can also be uploaded manually via the upload panel above.</p>
-        </div>
-      </section>
-
-      {/* ── Scraper Status Panel ───────────────────────────────────────── */}
-      <section className="glass-card rounded-xl p-6 border border-white/8">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="font-serif text-xl font-bold text-white flex items-center gap-2">
-            <RefreshCw className="w-5 h-5 text-primary/70" /> Shoob Sync Status
-          </h2>
-          <div className="flex gap-2">
-            <button onClick={fetchScraperStatus} disabled={scraperLoading}
-              className="px-3 py-1.5 rounded-lg bg-primary/10 border border-primary/30 text-primary text-xs font-bold uppercase tracking-wider hover:bg-primary/20 transition-colors disabled:opacity-50 flex items-center gap-1.5">
-              {scraperLoading ? <RefreshCw className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
-              Refresh
-            </button>
-            <button onClick={triggerScraperRun} disabled={runLoading}
-              className="px-3 py-1.5 rounded-lg bg-white/5 border border-white/15 text-white/80 text-xs font-bold uppercase tracking-wider hover:bg-white/10 transition-colors disabled:opacity-50 flex items-center gap-1.5">
-              {runLoading ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
-              Run Sync
-            </button>
+          <div className="glass-card rounded-lg px-4 py-3 border border-pink-500/20">
+            <p className="text-[10px] uppercase tracking-widest text-muted-foreground mb-1">Event cards live</p>
+            <p className="text-2xl font-bold text-pink-400">
+              {countLoading ? "…" : eventCount !== null ? eventCount.toLocaleString() : "Unknown"}
+            </p>
           </div>
+          <Button variant="outline" onClick={fetchCount} disabled={countLoading} className="border-white/10">
+            <RefreshCw className={`w-4 h-4 ${countLoading ? "animate-spin" : ""}`} />
+          </Button>
         </div>
 
-        {scraperStatus ? (
-          <div className="space-y-3">
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              {scraperStatus.status && (
-                <div className="bg-black/20 rounded-lg p-3 border border-white/5 text-center">
-                  <p className="text-[9px] uppercase tracking-widest text-muted-foreground mb-1">Source</p>
-                  <p className="text-sm font-bold text-emerald-400">{scraperStatus.source || scraperStatus.status}</p>
-                </div>
-              )}
-              {scraperStatus.total_cards !== undefined && (
-                <div className="bg-black/20 rounded-lg p-3 border border-white/5 text-center">
-                  <p className="text-[9px] uppercase tracking-widest text-muted-foreground mb-1">Total Cards</p>
-                  <p className="text-sm font-bold text-white">{scraperStatus.total_cards?.toLocaleString()}</p>
-                </div>
-              )}
-              {scraperStatus.shoob_cards !== undefined && (
-                <div className="bg-black/20 rounded-lg p-3 border border-white/5 text-center">
-                  <p className="text-[9px] uppercase tracking-widest text-muted-foreground mb-1">From Shoob</p>
-                  <p className="text-sm font-bold text-primary">{scraperStatus.shoob_cards?.toLocaleString()}</p>
-                </div>
-              )}
-              {scraperStatus.last_run && (
-                <div className="bg-black/20 rounded-lg p-3 border border-white/5 text-center">
-                  <p className="text-[9px] uppercase tracking-widest text-muted-foreground mb-1">Last Sync</p>
-                  <p className="text-xs font-mono text-muted-foreground">{new Date(scraperStatus.last_run).toLocaleString()}</p>
-                </div>
-              )}
-            </div>
-            {scraperStatus.tracked_ids !== undefined && (
-              <div className="text-xs text-muted-foreground bg-black/20 rounded p-3 border border-white/5">
-                🔗 Tracked Shoob IDs: <strong className="text-white">{scraperStatus.tracked_ids?.toLocaleString()}</strong>
-                {scraperStatus.last_run_type && <span className="ml-4">Last run type: <strong className="text-primary/80">{scraperStatus.last_run_type}</strong></span>}
-              </div>
+        <Button onClick={handleSync} disabled={syncing} className="bg-primary hover:bg-primary/90">
+          {syncing ? "Syncing…" : "Re-sync Now from unified_cards.jsonl"}
+        </Button>
+
+        {lastResult && (
+          <div className="mt-4 text-sm text-muted-foreground border-t border-white/8 pt-4">
+            {lastResult.success ? (
+              <p>Imported: <span className="text-white">{lastResult.imported ?? 0}</span> · Updated: <span className="text-white">{lastResult.updated ?? 0}</span> · Skipped: <span className="text-white">{lastResult.skipped ?? 0}</span></p>
+            ) : (
+              <p className="text-red-400">{lastResult.message || "Sync failed."}</p>
             )}
-          </div>
-        ) : (
-          <p className="text-muted-foreground text-sm">Click Refresh to load Shoob.gg sync status.</p>
-        )}
-
-        {scraperHistory.length > 0 && (
-          <div className="mt-4">
-            <p className="text-xs uppercase tracking-widest text-muted-foreground mb-2">Recent Shoob Sync History</p>
-            <div className="space-y-1 max-h-40 overflow-y-auto">
-              {scraperHistory.slice(0, 10).map((h: any, i: number) => (
-                <div key={i} className="flex items-center justify-between text-xs bg-black/20 rounded px-3 py-1.5 border border-white/5">
-                  <span className="font-mono text-muted-foreground">{h.timestamp ? new Date(h.timestamp).toLocaleString() : `Run ${i + 1}`}</span>
-                  <span className={cn("font-bold", h.success !== false ? "text-emerald-400" : "text-rose-400")}>
-                    {h.cards_added !== undefined ? `+${h.cards_added} cards` : (h.status || "OK")}
-                  </span>
-                </div>
-              ))}
-            </div>
           </div>
         )}
       </section>

@@ -9,6 +9,16 @@ import { svgToFramePng } from "../../bot/frames.js";
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 4 * 1024 * 1024 } });
 
+// The 5 hardcoded brand-default frames ship with the bot and re-seed
+// automatically if missing — these are the only frames that can never be
+// deleted. Everything else with uploaded_by "system" (bulk-seeded sets like
+// the Tensura community frames, or any future bulk import) is a normal,
+// deletable frame — "system" here means "not uploaded by a specific staff
+// member through the upload form," not "protected."
+const PROTECTED_BRAND_FRAMES = new Set([
+  "Celestial Sky", "Cherry Blossom", "Samurai Gold", "Neon Pulse", "Dragon Fire",
+]);
+
 function requireAuthOrAdmin(req: Request, res: Response, next: NextFunction): void {
   const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
   if (token) {
@@ -51,6 +61,7 @@ router.get("/", async (_req, res) => {
         uploadedBy: f.uploaded_by,
         createdAt: f.created_at,
         isSystem: f.uploaded_by === "system",
+        isProtected: f.uploaded_by === "system" && PROTECTED_BRAND_FRAMES.has(f.name),
       })),
     });
   } catch {
@@ -63,17 +74,34 @@ router.get("/:id/image", async (req, res) => {
     const frame = await getFrameById(req.params.id);
     if (!frame) { res.status(404).json({ success: false, message: "Frame not found" }); return; }
 
-    if ((frame as any).url && (!(frame as any).image)) {
-      res.redirect(302, (frame as any).url);
-      return;
-    }
-
     let imageBuffer: Buffer;
     if ((frame as any).image) {
       const img = (frame as any).image;
       imageBuffer = Buffer.isBuffer(img) ? img : Buffer.from(img, "base64");
     } else if ((frame as any).svg) {
       imageBuffer = await svgToFramePng((frame as any).svg);
+    } else if ((frame as any).url) {
+      // Never redirect to the external URL directly — that exposes the
+      // source domain to anyone who inspects the image (and this source in
+      // particular is another community bot's own site, not a neutral CDN).
+      // Fetch it once, cache the bytes into this frame's own `image` field,
+      // and serve from our own domain from now on. If the fetch fails (the
+      // external site being slow/down/blocking hotlinking), the player sees
+      // a clear placeholder instead of a broken-image icon that points
+      // straight at someone else's domain.
+      try {
+        const upstream = await fetch((frame as any).url, { signal: AbortSignal.timeout(10000) });
+        if (!upstream.ok) throw new Error(`upstream ${upstream.status}`);
+        const rawBuf = Buffer.from(await upstream.arrayBuffer());
+        imageBuffer = await sharp(rawBuf).resize(220, 220, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } }).png().toBuffer();
+        const frameOid = (frame as any)._id;
+        if (frameOid) {
+          await col("frames").updateOne({ _id: frameOid }, { $set: { image: imageBuffer.toString("base64") } }).catch(() => {});
+        }
+      } catch {
+        res.redirect(302, "/frame-placeholder.png");
+        return;
+      }
     } else {
       res.status(404).json({ success: false, message: "Frame has no image" }); return;
     }
@@ -174,9 +202,6 @@ router.delete("/:id", requireAuthOrAdmin, async (req: AuthRequest, res) => {
     // else with uploaded_by "system" (e.g. the Tensura community frame set,
     // or any other bulk-seeded collection) CAN be deleted individually —
     // staff need this to remove a mistakenly-imported frame.
-    const PROTECTED_BRAND_FRAMES = new Set([
-      "Celestial Sky", "Cherry Blossom", "Samurai Gold", "Neon Pulse", "Dragon Fire",
-    ]);
     if ((frame as any).uploaded_by === "system" && PROTECTED_BRAND_FRAMES.has((frame as any).name)) {
       res.status(403).json({ success: false, message: "Cannot delete a built-in default frame" }); return;
     }

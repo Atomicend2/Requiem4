@@ -113,13 +113,19 @@ export default function Profile() {
                 {stats?.profile.name?.charAt(0).toUpperCase() ?? "?"}
               </div>
             )}
-            {/* Frame ring overlaid on top of the avatar — always rendered if equipped */}
+            {/* Frame ring overlaid on top of the avatar — always rendered if equipped.
+                Always goes through our own /api/v1/frames/:id/image proxy, never
+                frame.url directly — that field can point at an external site
+                (e.g. a community frame pack), and serving it straight as an <img
+                src> both leaks that source to anyone inspecting the page and
+                breaks the image entirely if that site is ever unreachable. */}
             {equippedFrameId !== null && (
               <img
-                src={myFrameData?.frame?.url || `/api/v1/frames/${equippedFrameId}/image`}
-                alt="frame"
+                src={`/api/v1/frames/${equippedFrameId}/image`}
+                alt="Equipped frame"
                 className="absolute inset-0 w-full h-full object-contain pointer-events-none z-20 rounded-full"
                 style={{ filter: "drop-shadow(0 0 6px rgba(160,0,26,0.6))" }}
+                onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
               />
             )}
           </div>
@@ -729,10 +735,11 @@ function FramesTab({ token, userRole }: { token: string | null; userRole?: strin
                   )}
                   <div className="w-20 h-20 rounded-full overflow-hidden bg-black/50 border border-white/10 flex items-center justify-center">
                     <img
-                      src={frame.url || `/api/v1/frames/${frame.id}/image`}
+                      src={`/api/v1/frames/${frame.id}/image`}
                       alt={frame.name}
                       className="w-full h-full object-contain"
                       loading="lazy"
+                      onError={(e) => { (e.target as HTMLImageElement).style.visibility = "hidden"; }}
                     />
                   </div>
                   <div className="text-center">

@@ -71,7 +71,6 @@ async function fetchCardDetail(cardId: string): Promise<any> {
 export default function Cards() {
   const { isAuthenticated, user } = useAuth();
   const [tierFilter, setTierFilter] = useState<string>("all");
-  const [sortBy, setSortBy] = useState<string>("created_at");
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [page, setPage] = useState(1);
@@ -85,7 +84,6 @@ export default function Cards() {
   }, [search]);
 
   useEffect(() => { setPage(1); }, [tierFilter]);
-  useEffect(() => { setPage(1); }, [sortBy]);
 
   const [allCardsData, setAllCardsData] = useState<{ cards: any[]; total: number; pages: number } | null>(null);
   const [loadingAll, setLoadingAll] = useState(true);
@@ -97,7 +95,7 @@ export default function Cards() {
     setAllCardsError(null);
     const controller = new AbortController();
     try {
-      const data = await fetchCardsFromJson({ page, tier: tierFilter, search: debouncedSearch, sortBy }, controller.signal);
+      const data = await fetchCardsFromJson({ page, tier: tierFilter, search: debouncedSearch }, controller.signal);
       if (myId !== reqIdRef.current) return; // stale — a newer request is already running
       setAllCardsData(data);
     } catch (err: any) {
@@ -107,7 +105,7 @@ export default function Cards() {
     } finally {
       if (myId === reqIdRef.current) setLoadingAll(false);
     }
-  }, [page, tierFilter, debouncedSearch, sortBy]);
+  }, [page, tierFilter, debouncedSearch]);
 
   useEffect(() => { loadCards(); }, [loadCards]);
 
@@ -136,10 +134,9 @@ export default function Cards() {
   const [eventPage, setEventPage] = useState(1);
   const [eventFilter, setEventFilter] = useState<string>("all");
   const [eventTierFilter, setEventTierFilter] = useState<string>("all");
-  const [eventSortBy, setEventSortBy] = useState<string>("created_at");
   const eventReqIdRef = useRef(0);
 
-  useEffect(() => { setEventPage(1); }, [eventFilter, eventTierFilter, eventSortBy]);
+  useEffect(() => { setEventPage(1); }, [eventFilter, eventTierFilter]);
 
   useEffect(() => {
     if (!eventsLoaded) return;
@@ -150,7 +147,7 @@ export default function Cards() {
     (async () => {
       try {
         const data = await fetchEventCards(
-          { page: eventPage, event: eventFilter, tier: eventTierFilter, sortBy: eventSortBy, search: debouncedSearch },
+          { page: eventPage, event: eventFilter, tier: eventTierFilter, search: debouncedSearch },
           controller.signal
         );
         if (myId !== eventReqIdRef.current) return;
@@ -164,7 +161,7 @@ export default function Cards() {
       }
     })();
     return () => controller.abort();
-  }, [eventsLoaded, eventPage, eventFilter, eventTierFilter, eventSortBy, debouncedSearch]);
+  }, [eventsLoaded, eventPage, eventFilter, eventTierFilter, debouncedSearch]);
 
   const loadAuctions = useCallback(async () => {
     setAuctionLoading(true);
@@ -235,29 +232,29 @@ export default function Cards() {
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-        <TabsList className="flex w-full max-w-2xl bg-black/40 border border-primary/10 p-1 gap-1 overflow-x-auto mb-6">
-          <TabsTrigger value="all" className="flex-1 data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:neon-border-sky font-bold tracking-wider uppercase text-xs rounded-sm">
+        <TabsList className="flex w-full sm:max-w-3xl bg-black/40 border border-primary/10 p-1 gap-1 overflow-x-auto mb-6 justify-start sm:justify-stretch">
+          <TabsTrigger value="all" className="shrink-0 sm:flex-1 px-4 data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:neon-border-sky font-bold tracking-wider uppercase text-xs rounded-sm whitespace-nowrap">
             All Cards {allCardsData ? `(${allCardsData.total.toLocaleString()})` : ""}
           </TabsTrigger>
-          <TabsTrigger value="my" disabled={!isAuthenticated} className="flex-1 data-[state=active]:bg-primary/20 data-[state=active]:text-primary font-bold tracking-wider uppercase text-xs rounded-sm">
+          <TabsTrigger value="my" disabled={!isAuthenticated} className="shrink-0 sm:flex-1 px-4 data-[state=active]:bg-primary/20 data-[state=active]:text-primary font-bold tracking-wider uppercase text-xs rounded-sm whitespace-nowrap">
             My Collection {isAuthenticated && myCards ? `(${myCards.total})` : ""}
           </TabsTrigger>
-          <TabsTrigger value="gacha" className="flex-1 data-[state=active]:bg-amber-500/20 data-[state=active]:text-amber-400 font-bold tracking-wider uppercase text-xs rounded-sm whitespace-nowrap">
+          <TabsTrigger value="gacha" className="shrink-0 sm:flex-1 px-4 data-[state=active]:bg-amber-500/20 data-[state=active]:text-amber-400 font-bold tracking-wider uppercase text-xs rounded-sm whitespace-nowrap">
             Gacha {!isPremium && <Lock className="inline w-3 h-3 ml-1 opacity-60" />}
           </TabsTrigger>
-          <TabsTrigger value="fusion" className="flex-1 data-[state=active]:bg-rose-500/20 data-[state=active]:text-rose-400 font-bold tracking-wider uppercase text-xs rounded-sm whitespace-nowrap">
+          <TabsTrigger value="fusion" className="shrink-0 sm:flex-1 px-4 data-[state=active]:bg-rose-500/20 data-[state=active]:text-rose-400 font-bold tracking-wider uppercase text-xs rounded-sm whitespace-nowrap">
             Fusion
           </TabsTrigger>
           <TabsTrigger
             value="events"
-            className="flex-1 data-[state=active]:bg-pink-500/20 data-[state=active]:text-pink-400 font-bold tracking-wider uppercase text-xs rounded-sm whitespace-nowrap"
+            className="shrink-0 sm:flex-1 px-4 data-[state=active]:bg-pink-500/20 data-[state=active]:text-pink-400 font-bold tracking-wider uppercase text-xs rounded-sm whitespace-nowrap"
             onClick={() => { if (!eventsLoaded) setEventsLoaded(true); }}
           >
             Events {eventsData ? `(${eventsData.count.toLocaleString()})` : ""}
           </TabsTrigger>
           <TabsTrigger
             value="auction"
-            className="flex-1 data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-400 font-bold tracking-wider uppercase text-xs rounded-sm whitespace-nowrap"
+            className="shrink-0 sm:flex-1 px-4 data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-400 font-bold tracking-wider uppercase text-xs rounded-sm whitespace-nowrap"
             onClick={() => { if (!auctionLoaded) setAuctionLoaded(true); }}
           >
             Auction {auctionData.length > 0 ? `(${auctionData.length})` : ""}
@@ -303,43 +300,19 @@ export default function Cards() {
                   ))}
                 </SelectContent>
               </Select>
-              <Select value={eventSortBy} onValueChange={setEventSortBy}>
-                <SelectTrigger className="w-full sm:w-[180px] bg-black/40 border-primary/20 text-white">
-                  <SelectValue placeholder="Sort by" />
-                </SelectTrigger>
-                <SelectContent className="bg-[#0A0A0F] border-primary/20 text-white">
-                  <SelectItem value="created_at">Newest</SelectItem>
-                  <SelectItem value="name">Name (A–Z)</SelectItem>
-                  <SelectItem value="tier">Tier</SelectItem>
-                  <SelectItem value="series">Series (A–Z)</SelectItem>
-                </SelectContent>
-              </Select>
             </>
           ) : (
-            <>
-              <Select value={tierFilter} onValueChange={setTierFilter}>
-                <SelectTrigger className="w-full sm:w-[180px] bg-black/40 border-primary/20 text-white">
-                  <SelectValue placeholder="Filter by Tier" />
-                </SelectTrigger>
-                <SelectContent className="bg-[#0A0A0F] border-primary/20 text-white">
-                  <SelectItem value="all">All Tiers</SelectItem>
-                  {Object.entries(TIER_CONFIG).map(([key, cfg]) => (
-                    <SelectItem key={key} value={key}>{key} — {cfg.label}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <Select value={sortBy} onValueChange={setSortBy}>
-                <SelectTrigger className="w-full sm:w-[180px] bg-black/40 border-primary/20 text-white">
-                  <SelectValue placeholder="Sort by" />
-                </SelectTrigger>
-                <SelectContent className="bg-[#0A0A0F] border-primary/20 text-white">
-                  <SelectItem value="created_at">Newest</SelectItem>
-                  <SelectItem value="name">Name (A–Z)</SelectItem>
-                  <SelectItem value="tier">Tier</SelectItem>
-                  <SelectItem value="series">Series (A–Z)</SelectItem>
-                </SelectContent>
-              </Select>
-            </>
+            <Select value={tierFilter} onValueChange={setTierFilter}>
+              <SelectTrigger className="w-full sm:w-[180px] bg-black/40 border-primary/20 text-white">
+                <SelectValue placeholder="Filter by Tier" />
+              </SelectTrigger>
+              <SelectContent className="bg-[#0A0A0F] border-primary/20 text-white">
+                <SelectItem value="all">All Tiers</SelectItem>
+                {Object.entries(TIER_CONFIG).map(([key, cfg]) => (
+                  <SelectItem key={key} value={key}>{key} — {cfg.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           )}
         </div>
 
@@ -1043,6 +1016,11 @@ function FusionPanel({ isAuthenticated, myCards }: { isAuthenticated: boolean; m
   const [stagingTier, setStagingTier] = useState<string | null>(null);
   const [selectedCopyIds, setSelectedCopyIds] = useState<Set<string>>(new Set());
 
+  // Target-card selection state — populated when the API reports more than
+  // one possible result card for this tier and needs an explicit choice.
+  const [targetOptions, setTargetOptions] = useState<any[] | null>(null);
+  const [pendingFuseArgs, setPendingFuseArgs] = useState<{ tier: string; cardIds: string[] } | null>(null);
+
   // Build per-tier card lists from my collection
   const cardsByTier = (myCards?.cards ?? []).reduce((acc: Record<string, any[]>, uc: any) => {
     const t = uc.card?.tier || uc.tier;
@@ -1062,6 +1040,8 @@ function FusionPanel({ isAuthenticated, myCards }: { isAuthenticated: boolean; m
   const closePicker = () => {
     setStagingTier(null);
     setSelectedCopyIds(new Set());
+    setTargetOptions(null);
+    setPendingFuseArgs(null);
   };
 
   const toggleCard = (copyId: string, cost: number) => {
@@ -1076,20 +1056,26 @@ function FusionPanel({ isAuthenticated, myCards }: { isAuthenticated: boolean; m
     });
   };
 
-  const handleFuse = async (tier: string, cardIds: string[]) => {
+  const handleFuse = async (tier: string, cardIds: string[], targetCardId?: string) => {
     setFusingTier(tier);
     setResult(null);
     try {
       const r = await fetch("/api/v1/cards/fuse", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ tier, cardIds }),
+        body: JSON.stringify({ tier, cardIds, targetCardId }),
       });
       const j = await r.json();
       if (j.success) {
         setResult(j.result);
+        setTargetOptions(null);
+        setPendingFuseArgs(null);
         closePicker();
         toast({ title: "⚗️ Fusion Successful!", description: `You fused a ${j.result.tier} card: ${j.result.name}` });
+      } else if (j.needsTargetSelection && Array.isArray(j.options)) {
+        // Don't close the picker — show the result-card choices instead.
+        setTargetOptions(j.options);
+        setPendingFuseArgs({ tier, cardIds });
       } else {
         toast({ title: "Fusion Failed", description: j.message, variant: "destructive" });
       }
@@ -1217,7 +1203,38 @@ function FusionPanel({ isAuthenticated, myCards }: { isAuthenticated: boolean; m
                 })}
               </div>
 
+              {/* Target-card selection — shown when more than one result is possible */}
+              {targetOptions && pendingFuseArgs && (
+                <div className="p-4 border-t border-white/5 space-y-2">
+                  <p className="text-xs font-bold uppercase tracking-widest text-amber-400 mb-2">
+                    Choose which card you receive:
+                  </p>
+                  <div className="max-h-48 overflow-y-auto space-y-1.5">
+                    {targetOptions.map((opt: any) => (
+                      <button
+                        key={opt.id}
+                        onClick={() => handleFuse(pendingFuseArgs.tier, pendingFuseArgs.cardIds, opt.id)}
+                        disabled={loading}
+                        className="w-full flex items-center justify-between px-3 py-2 rounded-lg border border-white/10 bg-black/30 hover:border-amber-400/50 hover:bg-amber-400/5 text-left transition-all disabled:opacity-50"
+                      >
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-white truncate">{opt.name}</p>
+                          {opt.series && <p className="text-[10px] text-white/40 truncate">{opt.series}</p>}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    onClick={() => { setTargetOptions(null); setPendingFuseArgs(null); }}
+                    className="text-[10px] text-white/40 hover:text-white/70 uppercase tracking-widest mt-1"
+                  >
+                    ← Back
+                  </button>
+                </div>
+              )}
+
               {/* Confirm */}
+              {!targetOptions && (
               <div className="p-4 border-t border-white/5">
                 <Button
                   onClick={() => handleFuse(stagingTier, Array.from(selectedCopyIds))}
@@ -1238,6 +1255,7 @@ function FusionPanel({ isAuthenticated, myCards }: { isAuthenticated: boolean; m
                   )}
                 </Button>
               </div>
+              )}
             </div>
           </div>
         );
