@@ -98,32 +98,39 @@ export default function Profile() {
 
         <div className="relative z-10 flex flex-col md:flex-row items-center md:items-start gap-6">
           {/* Avatar + frame ring - pulled up to overlap the banner */}
-          <div className="-mt-20 md:-mt-24 shrink-0 relative">
+          <div className="-mt-20 md:-mt-24 shrink-0 relative w-32 h-32 md:w-44 md:h-44 flex items-center justify-center">
             {/* Outer glow shadow ring */}
             <div className="absolute inset-0 rounded-full shadow-[0_0_32px_6px_rgba(160,0,26,0.45)] pointer-events-none z-10" />
-            {/* Profile picture */}
+            {/* Profile picture — sized smaller than the outer container so an
+                equipped frame's ring has real room to sit outside the
+                avatar's edge instead of overlapping the face. Without this
+                gap the ring and the avatar occupy the exact same box and
+                the frame visibly cuts across the portrait instead of
+                framing it. */}
             {avatarUrl ? (
               <img
                 src={avatarUrl}
                 alt="avatar"
-                className="w-24 h-24 md:w-32 md:h-32 rounded-full object-cover border-4 border-black"
+                className="w-24 h-24 md:w-32 md:h-32 rounded-full object-cover border-4 border-black relative z-0"
               />
             ) : (
-              <div className="w-24 h-24 md:w-32 md:h-32 rounded-full bg-black border-4 border-black flex items-center justify-center text-4xl md:text-5xl font-serif text-primary">
+              <div className="w-24 h-24 md:w-32 md:h-32 rounded-full bg-black border-4 border-black flex items-center justify-center text-4xl md:text-5xl font-serif text-primary relative z-0">
                 {stats?.profile.name?.charAt(0).toUpperCase() ?? "?"}
               </div>
             )}
-            {/* Frame ring overlaid on top of the avatar — always rendered if equipped.
-                Always goes through our own /api/v1/frames/:id/image proxy, never
-                frame.url directly — that field can point at an external site
-                (e.g. a community frame pack), and serving it straight as an <img
-                src> both leaks that source to anyone inspecting the page and
-                breaks the image entirely if that site is ever unreachable. */}
+            {/* Frame ring — fills the full, larger outer container, so its
+                ring art sits around the avatar's outer edge rather than on
+                top of it. Always goes through our own
+                /api/v1/frames/:id/image proxy, never frame.url directly —
+                that field can point at an external site (e.g. a community
+                frame pack), and serving it straight as an <img src> both
+                leaks that source to anyone inspecting the page and breaks
+                the image entirely if that site is ever unreachable. */}
             {equippedFrameId !== null && (
               <img
                 src={`/api/v1/frames/${equippedFrameId}/image`}
                 alt="Equipped frame"
-                className="absolute inset-0 w-full h-full object-contain pointer-events-none z-20 rounded-full"
+                className="absolute inset-0 w-full h-full object-contain pointer-events-none z-20"
                 style={{ filter: "drop-shadow(0 0 6px rgba(160,0,26,0.6))" }}
                 onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
               />

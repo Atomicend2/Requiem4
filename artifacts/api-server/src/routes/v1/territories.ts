@@ -2,6 +2,7 @@ import { Router, type IRouter } from "express";
 import { col } from "../../bot/db/mongo.js";
 import { logger } from "../../lib/logger.js";
 import { CONTINENTS, REGIONS, TERRITORIES } from "../../bot/atlas.js";
+import { getGuildMembers, getTerritoryHistory } from "../../bot/db/queries.js";
 
 const router: IRouter = Router();
 
@@ -66,7 +67,8 @@ router.get("/", async (_req, res) => {
 
 /**
  * GET /api/v1/territories/:id
- * Detail view for a single territory, by its atlas slug.
+ * Detail view for a single territory, by its atlas slug — leader, member
+ * list, and conquest history for the click-to-open map panel.
  */
 router.get("/:id", async (req, res) => {
   try {
@@ -74,11 +76,29 @@ router.get("/:id", async (req, res) => {
     if (!def) { res.status(404).json({ success: false, message: "Territory not found" }); return; }
 
     const state = await col("territory_state").findOne({ territory_id: def.id });
-    let owner = null;
+    let owner: any = null;
     if (state?.guild_id) {
       const g = await col("guilds").findOne({ _id: state.guild_id as any });
-      if (g) owner = { id: String(g._id), name: (g as any).name, level: (g as any).level || 1 };
+      if (g) {
+        const members = await getGuildMembers(String(g._id));
+        const leaderPhone = (g as any).owner_id;
+        const leaderRow = leaderPhone ? await col("users").findOne({ _id: leaderPhone as any }) : null;
+        owner = {
+          id: String(g._id),
+          name: (g as any).name,
+          level: (g as any).level || 1,
+          emblem: (g as any).emblem || null,
+          description: (g as any).description || "",
+          leader: {
+            id: leaderPhone || null,
+            name: (leaderRow as any)?.name || leaderPhone || "Unknown",
+          },
+          memberCount: members.length,
+        };
+      }
     }
+
+    const history = await getTerritoryHistory(def.id, 15);
 
     const region = REGIONS.find((r) => r.id === def.region);
     const continent = region ? CONTINENTS.find((c) => c.id === region.continent) : null;
@@ -93,6 +113,14 @@ router.get("/:id", async (req, res) => {
         claimedAt: state?.claimed_at || null,
         taxRate: state?.tax_rate ?? null,
         dangerLevel: state?.danger_level ?? null,
+        warHistory: history.map((h: any) => ({
+          id: h.id,
+          title: h.title,
+          guildName: h.guild_name || null,
+          outcome: h.outcome || null,
+          actorName: h.actor_name,
+          timestamp: h.created_at,
+        })),
       },
     });
   } catch (err: any) {

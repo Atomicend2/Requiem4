@@ -866,11 +866,17 @@ async function buildProfileImage(ctx: CommandContext, targetId: string, user: an
     .png()
     .toBuffer();
 
-  // Frame gets a generous, clearly-visible margin around the avatar (44px on
-  // each side) so an equipped frame is unmistakable instead of a thin sliver.
-  const FRAME_SIZE = AV_SIZE + 88;
+  // Frame gets a generous, clearly-visible margin around the avatar so an
+  // equipped frame reads as surrounding the portrait rather than cutting
+  // across it. Some uploaded frames (including third-party sets) include
+  // decorative elements — horns, points, asymmetric flourishes — that
+  // intentionally extend inward past a plain ring's radius; a bigger gap
+  // between the avatar's own edge and the frame's bounding box gives that
+  // kind of artwork room to do that without visually overlapping the face.
+  const FRAME_SIZE = Math.round(AV_SIZE * 1.7);
   const FR_LEFT    = AV_CX - FRAME_SIZE / 2;
   const FR_TOP     = AV_CY - FRAME_SIZE / 2;
+
   let frameBuffer: Buffer | null = null;
   if (user.frame_id) {
     try {

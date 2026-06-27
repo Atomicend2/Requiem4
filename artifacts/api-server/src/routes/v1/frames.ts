@@ -2,6 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import multer from "multer";
 import sharp from "sharp";
 import { requireAuth, type AuthRequest } from "./middleware.js";
+import { requireAdminAccess } from "./admin.js";
 import { col } from "../../bot/db/mongo.js";
 import { getAllFrames, getFrameById, addFrame, equipFrame, getUserEquippedFrame } from "../../bot/db/queries.js";
 import { svgToFramePng } from "../../bot/frames.js";
@@ -18,25 +19,6 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 4 *
 const PROTECTED_BRAND_FRAMES = new Set([
   "Celestial Sky", "Cherry Blossom", "Samurai Gold", "Neon Pulse", "Dragon Fire",
 ]);
-
-function requireAuthOrAdmin(req: Request, res: Response, next: NextFunction): void {
-  const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
-  if (token) {
-    (async () => {
-      const now = Math.floor(Date.now() / 1000);
-      const adminRow = await col("admin_sessions").findOne({ _id: token as any, expires_at: { $gt: now } });
-      if (adminRow) {
-        (req as any).isAdminSession = true;
-        (req as any).userId = "admin";
-        next();
-        return;
-      }
-      requireAuth(req as AuthRequest, res, next);
-    })().catch(() => requireAuth(req as AuthRequest, res, next));
-    return;
-  }
-  requireAuth(req as AuthRequest, res, next);
-}
 
 const BOT_OWNER = (process.env["BOT_OWNER_PHONE"] || "2348144550593").replace(/\D/g, "");
 
@@ -145,7 +127,7 @@ router.get("/me", requireAuth, async (req: AuthRequest, res) => {
   }
 });
 
-router.post("/upload", requireAuthOrAdmin, upload.single("frame"), async (req: AuthRequest, res) => {
+router.post("/upload", requireAdminAccess as any, upload.single("frame"), async (req: AuthRequest, res) => {
   try {
     if (!(req as any).isAdminSession && !(await isStaff(req))) {
       res.status(403).json({ success: false, message: "Staff only" }); return;
@@ -187,7 +169,7 @@ router.post("/upload", requireAuthOrAdmin, upload.single("frame"), async (req: A
   }
 });
 
-router.delete("/:id", requireAuthOrAdmin, async (req: AuthRequest, res) => {
+router.delete("/:id", requireAdminAccess as any, async (req: AuthRequest, res) => {
   try {
     if (!(req as any).isAdminSession && !(await isStaff(req))) {
       res.status(403).json({ success: false, message: "Staff only" }); return;

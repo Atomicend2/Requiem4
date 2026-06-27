@@ -957,6 +957,7 @@ export async function createGuild(id: string, name: string, ownerId: string): Pr
     level: 1,
     xp: 0,
     description: "",
+    emblem: null,
     created_at: now(),
   });
   await col("guild_members").updateOne(
@@ -1588,6 +1589,11 @@ export async function addWorldHistory(entry: {
   actor_name: string;
   group_id?: string;
   category: string;
+  territory_id?: string;
+  guild_id?: string;
+  guild_name?: string;
+  previous_guild_id?: string | null;
+  outcome?: string;
 }): Promise<void> {
   await col("world_history").insertOne({ ...entry, created_at: now() });
 }
@@ -1595,6 +1601,20 @@ export async function addWorldHistory(entry: {
 export async function getWorldHistory(groupId?: string, limit = 20): Promise<any[]> {
   const query: any = groupId ? { $or: [{ group_id: groupId }, { group_id: null }] } : {};
   const docs = await col("world_history").find(query).sort({ created_at: -1 }).limit(limit).toArray();
+  return docs.map((d) => ({ ...d, id: toStr(d._id) }));
+}
+
+// Conquest history for one specific territory — this is what powers the
+// "war history" section of the territory detail panel on the website map.
+// Only entries logged after the territory_id field was added (see
+// claimTerritory above) will appear here; older claims made before this
+// field existed won't have one to match against.
+export async function getTerritoryHistory(territoryId: string, limit = 20): Promise<any[]> {
+  const docs = await col("world_history")
+    .find({ category: "territory", territory_id: territoryId })
+    .sort({ created_at: -1 })
+    .limit(limit)
+    .toArray();
   return docs.map((d) => ({ ...d, id: toStr(d._id) }));
 }
 
@@ -1686,6 +1706,11 @@ export async function claimTerritory(
     actor: claimantUserId,
     actor_name: claimantName,
     category: "territory",
+    territory_id: territoryId,
+    guild_id: guildId,
+    guild_name: guildName,
+    previous_guild_id: previousGuildId,
+    outcome,
   });
 
   return { outcome, previousGuildId };

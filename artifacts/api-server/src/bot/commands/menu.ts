@@ -210,6 +210,18 @@ export async function handleMenu(ctx: CommandContext): Promise<void> {
 ➺ .territory / .claim — View, claim, or set tax on world territories
 
 ❀━━━━━━━━━━━━━━❀
+       🏰 GUILD
+❀━━━━━━━━━━━━━━❀
+➺ .guild create <name> — Found a guild (Lv.20 + Guild Scroll required)
+➺ .guild join <name> — Join an existing guild
+➺ .guild leave — Leave your current guild
+➺ .guild info [name] — View a guild's details
+➺ .guild list — List all guilds
+➺ .guild desc <text> — Set your guild's description (owner only)
+➺ .guild kick @user — Remove a member (owner only)
+➺ .guild disband — Disband your guild (owner only)
+
+❀━━━━━━━━━━━━━━❀
         🏰 𝗗𝗨𝗡𝗚𝗘𝗢𝗡
 ❀━━━━━━━━━━━━━━❀
 ➺ .dungeon — Enter a dungeon

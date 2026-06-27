@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef, Component, type ReactNode } from "react";
+import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import {
   Users, CreditCard, Shield, Wifi, WifiOff, Crown, Ban,
@@ -1107,7 +1108,7 @@ function AdminFramesPanel({ token, base, toast }: { token: string; base: string;
                 {!frame.isProtected && (
                   <button
                     onClick={() => deleteFrame(frame.id, frame.name)}
-                    className="absolute top-2 right-2 p-1 rounded-md text-rose-400 opacity-0 group-hover:opacity-100 hover:bg-rose-500/10 transition-all"
+                    className="absolute top-2 right-2 p-1.5 rounded-md text-rose-400 bg-black/50 border border-rose-500/30 hover:bg-rose-500/20 hover:border-rose-500/60 transition-all"
                     title="Delete frame"
                   >
                     <Trash2 className="w-3.5 h-3.5" />

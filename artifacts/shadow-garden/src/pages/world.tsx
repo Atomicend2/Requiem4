@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useRef, useState, useCallback } from "react";
-import { Crown, MapPin, Loader2, ZoomIn, ZoomOut, Maximize2 } from "lucide-react";
+import { useEffect, useRef, useState, useCallback } from "react";
+import L from "leaflet";
+import "leaflet/dist/leaflet.css";
+import { Crown, MapPin, Loader2, X, Swords, Users, Shield } from "lucide-react";
 
 interface TerritoryOwner {
   id: string;
@@ -21,345 +23,332 @@ interface Territory {
   dangerLevel: number | null;
 }
 
-interface RegionInfo {
+interface TerritoryDetail {
   id: string;
   name: string;
-  continent: string;
+  resource: string;
+  baseIncome: number;
+  x: number;
+  y: number;
+  claimedAt: number | null;
+  taxRate: number | null;
+  dangerLevel: number | null;
+  region: { id: string; name: string } | null;
+  continent: { id: string; name: string } | null;
+  owner: (TerritoryOwner & {
+    emblem: string | null;
+    description: string;
+    leader: { id: string | null; name: string };
+    memberCount: number;
+  }) | null;
+  warHistory: Array<{
+    id: string;
+    title: string;
+    guildName: string | null;
+    outcome: string | null;
+    actorName: string;
+    timestamp: number;
+  }>;
 }
 
-interface ContinentInfo {
-  id: string;
-  name: string;
-}
-
-async function fetchTerritories(): Promise<{ continents: ContinentInfo[]; regions: RegionInfo[]; territories: Territory[] }> {
+async function fetchTerritories(): Promise<{ territories: Territory[] }> {
   const res = await fetch("/api/v1/territories");
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+async function fetchTerritoryDetail(id: string): Promise<{ territory: TerritoryDetail }> {
+  const res = await fetch(`/api/v1/territories/${id}`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 
 // Deterministic color per guild id, so the same guild always shows the same
 // marker color everywhere on the map without needing a stored color field.
-const GUILD_PALETTE = [
-  { dot: "bg-amber-400",  ring: "border-amber-400/30",  text: "text-amber-400",  glow: "rgba(251,191,36,0.8)" },
-  { dot: "bg-primary",    ring: "border-primary/30",    text: "text-primary",    glow: "rgba(160,0,26,0.8)" },
-  { dot: "bg-teal-400",   ring: "border-teal-400/30",   text: "text-teal-400",   glow: "rgba(45,212,191,0.8)" },
-  { dot: "bg-sky-400",    ring: "border-sky-400/30",    text: "text-sky-400",    glow: "rgba(56,189,248,0.8)" },
-  { dot: "bg-violet-400", ring: "border-violet-400/30", text: "text-violet-400", glow: "rgba(167,139,250,0.8)" },
-  { dot: "bg-emerald-400", ring: "border-emerald-400/30", text: "text-emerald-400", glow: "rgba(52,211,153,0.8)" },
-  { dot: "bg-orange-400", ring: "border-orange-400/30", text: "text-orange-400", glow: "rgba(251,146,60,0.8)" },
-];
-const UNCLAIMED_STYLE = { dot: "bg-white/25", ring: "border-white/15", text: "text-white/50", glow: "rgba(255,255,255,0.25)" };
+const GUILD_COLORS = ["#fbbf24", "#a0001a", "#2dd4bf", "#38bdf8", "#a78bfa", "#34d399", "#fb923c"];
+const UNCLAIMED_COLOR = "rgba(255,255,255,0.35)";
 
-function colorForGuild(guildId: string) {
+function colorForGuild(guildId: string): string {
   let hash = 0;
   for (let i = 0; i < guildId.length; i++) hash = (hash * 31 + guildId.charCodeAt(i)) >>> 0;
-  return GUILD_PALETTE[hash % GUILD_PALETTE.length];
+  return GUILD_COLORS[hash % GUILD_COLORS.length];
 }
 
-// Map viewport — fixed coordinate space the background image and every
-// marker's x/y percent are positioned within. Pan/zoom only ever transforms
-// this fixed-size layer, so territory markers always line up with the map
-// regardless of zoom level.
+// Flat-plane coordinate space for the map image — Leaflet's Simple CRS
+// treats this as pixel coordinates rather than real-world lat/lng, which is
+// the correct mode for a fictional/game map instead of actual geography.
 const MAP_W = 1408;
 const MAP_H = 768;
-const MIN_ZOOM = 1;
-const MAX_ZOOM = 4;
 
-export default function World() {
-  const [data, setData] = useState<{ continents: ContinentInfo[]; regions: RegionInfo[]; territories: Territory[] } | null>(null);
-  const [error, setError] = useState(false);
+function World() {
+  const mapElRef = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<L.Map | null>(null);
+  // territory id -> live Leaflet layer, so ownership-color updates can
+  // restyle an existing marker in place instead of tearing down and
+  // rebuilding the whole map every time data refreshes.
+  const markersRef = useRef<Map<string, L.CircleMarker>>(new Map());
+  const territoriesRef = useRef<Territory[]>([]);
+
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<TerritoryDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
 
-  // ── Pan / zoom state ──────────────────────────────────────────────────
-  const viewportRef = useRef<HTMLDivElement>(null);
-  const [zoom, setZoom] = useState(1);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
-  const [isDragging, setIsDragging] = useState(false);
-  const dragState = useRef<{ dragging: boolean; startX: number; startY: number; panX: number; panY: number }>({
-    dragging: false, startX: 0, startY: 0, panX: 0, panY: 0,
-  });
-
-  const clampPan = useCallback((nextZoom: number, nextPan: { x: number; y: number }) => {
-    const vp = viewportRef.current;
-    if (!vp) return nextPan;
-    const vw = vp.clientWidth;
-    const vh = vp.clientHeight;
-    const scaledW = MAP_W * nextZoom;
-    const scaledH = MAP_H * nextZoom;
-    // Don't let the map pan past its own edges — clamp so the viewport
-    // never shows empty space beyond the map image.
-    const minX = Math.min(0, vw - scaledW);
-    const minY = Math.min(0, vh - scaledH);
-    return {
-      x: Math.max(minX, Math.min(0, nextPan.x)),
-      y: Math.max(minY, Math.min(0, nextPan.y)),
-    };
+  const buildPopupHtml = useCallback((t: Territory) => {
+    const ownerLine = t.owner
+      ? `<div style="color:#d4c9a8;font-size:11px;margin-top:2px;">Held by <strong style="color:${colorForGuild(t.owner.id)}">${t.owner.name}</strong></div>`
+      : `<div style="color:rgba(160,0,26,0.7);font-size:11px;margin-top:2px;">Unclaimed</div>`;
+    return `<div style="font-family:inherit;min-width:140px;">
+      <div style="font-weight:700;color:#fff;font-size:13px;">${t.name}</div>
+      <div style="color:rgba(212,201,168,0.5);font-size:10px;">${t.resource} · ${t.baseIncome.toLocaleString()} gold/day</div>
+      ${ownerLine}
+    </div>`;
   }, []);
 
-  const zoomTo = useCallback((nextZoom: number, focalX?: number, focalY?: number) => {
-    const vp = viewportRef.current;
-    const clamped = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, nextZoom));
-    setZoom((prevZoom) => {
-      if (!vp) return clamped;
-      // Zoom toward the cursor/pinch point rather than the top-left corner,
-      // the same way Google Maps keeps whatever you're pointing at in place.
-      const fx = focalX ?? vp.clientWidth / 2;
-      const fy = focalY ?? vp.clientHeight / 2;
-      setPan((prevPan) => {
-        const ratio = clamped / prevZoom;
-        const newPan = {
-          x: fx - (fx - prevPan.x) * ratio,
-          y: fy - (fy - prevPan.y) * ratio,
-        };
-        return clampPan(clamped, newPan);
-      });
-      return clamped;
-    });
-  }, [clampPan]);
+  // ── Apply live ownership colors onto existing markers — never recreate
+  // the map or its markers for a data refresh, only restyle in place. ──
+  const applyOwnership = useCallback((territories: Territory[]) => {
+    territoriesRef.current = territories;
+    for (const t of territories) {
+      const marker = markersRef.current.get(t.id);
+      if (!marker) continue;
+      const color = t.owner ? colorForGuild(t.owner.id) : UNCLAIMED_COLOR;
+      marker.setStyle({ color, fillColor: color, fillOpacity: t.owner ? 0.85 : 0.3 });
+      marker.setPopupContent(buildPopupHtml(t));
+    }
+  }, [buildPopupHtml]);
 
-  const resetView = useCallback(() => {
-    setZoom(1);
-    setPan({ x: 0, y: 0 });
-  }, []);
-
-  const onWheel = useCallback((e: React.WheelEvent) => {
-    e.preventDefault();
-    const vp = viewportRef.current;
-    if (!vp) return;
-    const rect = vp.getBoundingClientRect();
-    const focalX = e.clientX - rect.left;
-    const focalY = e.clientY - rect.top;
-    const delta = e.deltaY > 0 ? -0.18 : 0.18;
-    zoomTo(zoom + delta * zoom, focalX, focalY);
-  }, [zoom, zoomTo]);
-
-  const onPointerDown = useCallback((e: React.PointerEvent) => {
-    dragState.current = { dragging: true, startX: e.clientX, startY: e.clientY, panX: pan.x, panY: pan.y };
-    setIsDragging(true);
-    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
-  }, [pan]);
-
-  const onPointerMove = useCallback((e: React.PointerEvent) => {
-    if (!dragState.current.dragging) return;
-    const dx = e.clientX - dragState.current.startX;
-    const dy = e.clientY - dragState.current.startY;
-    setPan(clampPan(zoom, { x: dragState.current.panX + dx, y: dragState.current.panY + dy }));
-  }, [zoom, clampPan]);
-
-  const onPointerUp = useCallback(() => {
-    dragState.current.dragging = false;
-    setIsDragging(false);
-  }, []);
-
-  // ── Data fetching ──────────────────────────────────────────────────────
+  // ── One-time map + marker construction ──────────────────────────────────
   useEffect(() => {
+    if (!mapElRef.current || mapRef.current) return;
+
+    const map = L.map(mapElRef.current, {
+      crs: L.CRS.Simple,
+      minZoom: -1,
+      maxZoom: 4,
+      zoomSnap: 0.25,
+      attributionControl: false,
+    });
+    mapRef.current = map;
+
+    const bounds: L.LatLngBoundsExpression = [[0, 0], [MAP_H, MAP_W]];
+    L.imageOverlay("/images/world-map.png", bounds).addTo(map);
+    map.fitBounds(bounds);
+    map.setMaxBounds(bounds);
+
     let mounted = true;
     (async () => {
       try {
         const result = await fetchTerritories();
-        if (mounted) setData(result);
+        if (!mounted) return;
+
+        for (const t of result.territories) {
+          // x/y are 0–100 percent in the atlas data; convert to this map's
+          // pixel plane. Leaflet's y-axis increases upward in Simple CRS,
+          // so the percent-from-top y value needs flipping.
+          const px = (t.x / 100) * MAP_W;
+          const py = MAP_H - (t.y / 100) * MAP_H;
+          const color = t.owner ? colorForGuild(t.owner.id) : UNCLAIMED_COLOR;
+
+          const marker = L.circleMarker([py, px], {
+            radius: 9,
+            color,
+            weight: 2,
+            fillColor: color,
+            fillOpacity: t.owner ? 0.85 : 0.3,
+          }).addTo(map);
+
+          marker.bindPopup(buildPopupHtml(t));
+          marker.on("click", () => setSelectedId(t.id));
+
+          markersRef.current.set(t.id, marker);
+        }
+        territoriesRef.current = result.territories;
+        setLoading(false);
       } catch {
-        if (mounted) setError(true);
-      } finally {
-        if (mounted) setLoading(false);
+        if (mounted) { setError(true); setLoading(false); }
       }
     })();
-    // Refresh periodically so a territory claimed in WhatsApp shows up here
-    // without needing a manual page reload.
+
+    return () => {
+      mounted = false;
+      map.remove();
+      mapRef.current = null;
+      markersRef.current.clear();
+    };
+  }, [buildPopupHtml]);
+
+  // ── Poll for ownership changes — restyles existing markers, never
+  // rebuilds the map. This is what makes a .territory claim in WhatsApp
+  // show up here automatically without a page reload. ──
+  useEffect(() => {
     const interval = setInterval(async () => {
       try {
         const result = await fetchTerritories();
-        if (mounted) setData(result);
-      } catch { /* keep showing the last good data on a transient failure */ }
-    }, 30000);
-    return () => { mounted = false; clearInterval(interval); };
-  }, []);
+        applyOwnership(result.territories);
+      } catch { /* keep showing last good state on a transient failure */ }
+    }, 15000);
+    return () => clearInterval(interval);
+  }, [applyOwnership]);
 
-  const regionById = useMemo(() => new Map((data?.regions || []).map((r) => [r.id, r])), [data]);
-  const continentById = useMemo(() => new Map((data?.continents || []).map((c) => [c.id, c])), [data]);
-
-  // Active guilds present on the map right now, for the legend.
-  const activeGuilds = useMemo(() => {
-    const seen = new Map<string, TerritoryOwner>();
-    for (const t of data?.territories || []) {
-      if (t.owner && !seen.has(t.owner.id)) seen.set(t.owner.id, t.owner);
-    }
-    return [...seen.values()];
-  }, [data]);
+  // ── Detail panel data fetch ──────────────────────────────────────────────
+  useEffect(() => {
+    if (!selectedId) { setDetail(null); return; }
+    let mounted = true;
+    setDetailLoading(true);
+    (async () => {
+      try {
+        const result = await fetchTerritoryDetail(selectedId);
+        if (mounted) setDetail(result.territory);
+      } catch {
+        if (mounted) setDetail(null);
+      } finally {
+        if (mounted) setDetailLoading(false);
+      }
+    })();
+    return () => { mounted = false; };
+  }, [selectedId]);
 
   return (
     <div className="min-h-screen relative overflow-hidden flex flex-col bg-[#05050a]">
 
       {/* ── Header ── */}
       <div className="relative z-20 p-6 md:p-8 pointer-events-none" style={{ background: "linear-gradient(to bottom, rgba(0,0,0,0.65), transparent)" }}>
-        <p className="font-mono tracking-[0.5em] text-xs uppercase mb-1" style={{ color:"rgba(160,0,26,0.4)" }}>反逆</p>
+        <p className="font-mono tracking-[0.5em] text-xs uppercase mb-1" style={{ color: "rgba(160,0,26,0.4)" }}>反逆</p>
         <h1 className="font-serif text-3xl md:text-5xl font-bold text-white tracking-widest uppercase neon-text-sky">Requiem Order World Atlas</h1>
-        <p className="mt-2 max-w-xl text-sm" style={{ color:"rgba(212,201,168,0.45)" }}>
-          Live territory control across the known world. Every marker reflects real guild ownership — claim territory in-bot with <span className="font-mono">.territory claim</span> and it appears here. Scroll or pinch to zoom, drag to pan.
+        <p className="mt-2 max-w-xl text-sm" style={{ color: "rgba(212,201,168,0.45)" }}>
+          Live territory control across the known world. Claim territory in-bot with <span className="font-mono">.territory claim</span> and it appears here — no reload needed. Scroll to zoom, drag to pan, click a marker for details.
         </p>
       </div>
 
       {/* ── Loading / error states ── */}
       {loading && (
-        <div className="flex-1 flex items-center justify-center z-10 gap-2 text-white/40 text-sm">
+        <div className="absolute inset-0 flex items-center justify-center z-30 gap-2 text-white/40 text-sm bg-[#05050a]/60">
           <Loader2 className="w-4 h-4 animate-spin" /> Loading world state...
         </div>
       )}
       {!loading && error && (
-        <div className="flex-1 flex items-center justify-center z-10 text-rose-400/70 text-sm">
+        <div className="absolute inset-0 flex items-center justify-center z-30 text-rose-400/70 text-sm bg-[#05050a]/60">
           Failed to load territory data. Please try again shortly.
         </div>
       )}
 
-      {/* ── Pan/zoom viewport ── */}
-      {!loading && !error && data && (
-        <div
-          ref={viewportRef}
-          className="flex-1 relative w-full min-h-[500px] z-10 overflow-hidden touch-none select-none"
-          style={{ cursor: isDragging ? "grabbing" : "grab" }}
-          onWheel={onWheel}
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
-          onPointerLeave={onPointerUp}
-        >
-          {/* Fixed-size map layer — background image + markers share this
-              coordinate space, so pan/zoom transforms them together and
-              every marker's x/y percent always lines up with the art. */}
+      {/* ── Leaflet map container ── */}
+      <div ref={mapElRef} className="flex-1 w-full min-h-[500px] z-10" style={{ background: "#05050a" }} />
+
+      {/* ── Territory detail panel ── */}
+      {selectedId && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.6)" }} onClick={() => setSelectedId(null)}>
           <div
-            className="absolute top-0 left-0"
-            style={{
-              width: MAP_W,
-              height: MAP_H,
-              transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
-              transformOrigin: "0 0",
-              transition: isDragging ? "none" : "transform 0.12s ease-out",
-            }}
+            className="w-full max-w-md rounded-2xl overflow-hidden"
+            style={{ background: "rgba(17,17,23,0.97)", border: "1px solid rgba(160,0,26,0.25)", boxShadow: "0 0 40px rgba(160,0,26,0.25)" }}
+            onClick={(e) => e.stopPropagation()}
           >
-            <img
-              src="/images/world-map.png"
-              alt="World map"
-              draggable={false}
-              className="absolute inset-0 w-full h-full object-cover pointer-events-none select-none"
-            />
+            <div className="flex items-center justify-between p-4" style={{ borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
+              <h2 className="font-serif text-lg font-bold text-white">{detail?.name || "Loading…"}</h2>
+              <button onClick={() => setSelectedId(null)} className="text-white/40 hover:text-white transition-colors">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
 
-            {data.territories.map((territory) => {
-              const style = territory.owner ? colorForGuild(territory.owner.id) : UNCLAIMED_STYLE;
-              const region = regionById.get(territory.region);
-              const continent = region ? continentById.get(region.continent) : undefined;
-              // Marker visual size stays roughly constant on screen by
-              // counter-scaling against zoom — otherwise markers would grow
-              // huge at high zoom and become unreadable blobs.
-              const counterScale = 1 / Math.sqrt(zoom);
-              return (
-                <div
-                  key={territory.id}
-                  className="absolute group/marker cursor-crosshair"
-                  style={{
-                    left: `${territory.x}%`,
-                    top: `${territory.y}%`,
-                    transform: `translate(-50%, -50%) scale(${counterScale})`,
-                  }}
-                >
-                  <div className="relative">
-                    {/* Outer pulse — only animates for claimed territories */}
-                    {territory.owner && (
-                      <>
-                        <div className={`absolute inset-0 rounded-full animate-ping opacity-25 ${style.dot}`} style={{ animationDuration: "2.6s" }} />
-                        <div className={`absolute inset-0 rounded-full animate-ping opacity-10 scale-[2] ${style.dot}`} style={{ animationDuration: "3.8s" }} />
-                      </>
-                    )}
-
-                    {/* Marker */}
-                    <div className={`w-10 h-10 rounded-full flex items-center justify-center relative z-10 border transition-all duration-300 hover:scale-110 glass-card ${style.text} ${style.ring}`}
-                      style={{ background:"rgba(0,0,0,0.55)" }}>
-                      {territory.owner ? <Crown className="w-4 h-4" /> : <MapPin className="w-4 h-4" />}
-                    </div>
-
-                    {/* Tooltip */}
-                    <div className="absolute top-full left-1/2 -translate-x-1/2 mt-4 p-4 rounded-xl opacity-0 translate-y-2 pointer-events-none group-hover/marker:opacity-100 group-hover/marker:translate-y-0 transition-all duration-300 z-50"
-                      style={{ width:260, background:"rgba(17,17,23,0.92)", border:"1px solid rgba(160,0,26,0.18)", boxShadow:"0 0 30px rgba(160,0,26,0.2)" }}>
-                      <div className={`text-[10px] font-mono tracking-widest uppercase mb-1 opacity-60 ${style.text}`}>
-                        {continent?.name || "?"} · {region?.name || "?"}
-                      </div>
-                      <h3 className="font-serif text-base font-bold text-white mb-1.5">{territory.name}</h3>
-                      <p className="text-xs leading-relaxed" style={{ color:"rgba(212,201,168,0.55)" }}>
-                        Produces <span className="text-white/70">{territory.resource}</span> — {territory.baseIncome.toLocaleString()} gold/day base income.
-                      </p>
-                      <div className="mt-3 pt-2 text-[10px] font-bold tracking-[0.2em] uppercase text-center" style={{ borderTop:"1px solid rgba(255,255,255,0.05)", color: territory.owner ? "rgba(212,201,168,0.7)" : "rgba(160,0,26,0.6)" }}>
-                        {territory.owner
-                          ? `Controlled by ${territory.owner.name}${territory.taxRate != null ? ` · ${territory.taxRate}% tax` : ""}`
-                          : "Unclaimed Territory"}
-                      </div>
-                    </div>
-                  </div>
+            <div className="p-5 max-h-[70vh] overflow-y-auto space-y-5">
+              {detailLoading && (
+                <div className="flex items-center justify-center gap-2 text-white/40 text-sm py-8">
+                  <Loader2 className="w-4 h-4 animate-spin" /> Loading territory details...
                 </div>
-              );
-            })}
-          </div>
+              )}
 
-          {/* ── Zoom controls ── */}
-          <div className="absolute bottom-6 left-6 z-30 flex flex-col gap-1.5 pointer-events-auto">
-            <button
-              onClick={() => zoomTo(zoom + 0.5)}
-              className="w-9 h-9 rounded-lg flex items-center justify-center text-white/70 hover:text-white transition-colors"
-              style={{ background: "rgba(17,17,23,0.85)", border: "1px solid rgba(160,0,26,0.2)" }}
-              title="Zoom in"
-            >
-              <ZoomIn className="w-4 h-4" />
-            </button>
-            <button
-              onClick={() => zoomTo(zoom - 0.5)}
-              className="w-9 h-9 rounded-lg flex items-center justify-center text-white/70 hover:text-white transition-colors"
-              style={{ background: "rgba(17,17,23,0.85)", border: "1px solid rgba(160,0,26,0.2)" }}
-              title="Zoom out"
-            >
-              <ZoomOut className="w-4 h-4" />
-            </button>
-            <button
-              onClick={resetView}
-              className="w-9 h-9 rounded-lg flex items-center justify-center text-white/70 hover:text-white transition-colors"
-              style={{ background: "rgba(17,17,23,0.85)", border: "1px solid rgba(160,0,26,0.2)" }}
-              title="Reset view"
-            >
-              <Maximize2 className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-      )}
+              {!detailLoading && detail && (
+                <>
+                  <div className="flex items-center gap-2 text-xs" style={{ color: "rgba(212,201,168,0.5)" }}>
+                    <span>{detail.continent?.name || "?"}</span>
+                    <span>·</span>
+                    <span>{detail.region?.name || "?"}</span>
+                    <span>·</span>
+                    <span className="text-white/60">{detail.resource}</span>
+                    <span>·</span>
+                    <span className="text-white/60">{detail.baseIncome.toLocaleString()} gold/day</span>
+                  </div>
 
-      {/* ── Legend ── */}
-      {!loading && !error && (
-        <div className="absolute z-20 p-4 rounded-xl" style={{ bottom:24, right:24, background:"rgba(17,17,23,0.85)", border:"1px solid rgba(160,0,26,0.15)", boxShadow:"0 0 20px rgba(160,0,26,0.08)" }}>
-          <h4 className="text-[10px] font-mono font-bold tracking-[0.3em] uppercase pb-2 mb-3" style={{ color:"rgba(160,0,26,0.5)", borderBottom:"1px solid rgba(255,255,255,0.06)" }}>
-            Guild Control
-          </h4>
-          <ul className="space-y-2 text-xs text-white/70 max-h-48 overflow-y-auto pr-1">
-            {activeGuilds.length === 0 && (
-              <li className="text-white/40 italic">No territories claimed yet</li>
-            )}
-            {activeGuilds.map((g) => {
-              const style = colorForGuild(g.id);
-              return (
-                <li key={g.id} className="flex items-center gap-2">
-                  <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${style.dot}`} style={{ boxShadow: `0 0 6px ${style.glow}` }} />
-                  {g.name}
-                </li>
-              );
-            })}
-            <li className="flex items-center gap-2 pt-1" style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}>
-              <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${UNCLAIMED_STYLE.dot}`} />
-              Unclaimed
-            </li>
-          </ul>
+                  {detail.owner ? (
+                    <div className="rounded-xl p-4" style={{ background: "rgba(0,0,0,0.3)", border: `1px solid ${colorForGuild(detail.owner.id)}33` }}>
+                      <div className="flex items-center gap-3 mb-3">
+                        <div
+                          className="w-12 h-12 rounded-full flex items-center justify-center font-serif font-bold text-lg shrink-0"
+                          style={{
+                            background: detail.owner.emblem ? `url(${detail.owner.emblem}) center/cover` : `${colorForGuild(detail.owner.id)}22`,
+                            color: colorForGuild(detail.owner.id),
+                            border: `2px solid ${colorForGuild(detail.owner.id)}55`,
+                          }}
+                        >
+                          {!detail.owner.emblem && detail.owner.name.charAt(0).toUpperCase()}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="font-bold text-white truncate">{detail.owner.name}</p>
+                          <p className="text-xs" style={{ color: "rgba(212,201,168,0.5)" }}>Guild Level {detail.owner.level}</p>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 text-xs">
+                        <div className="flex items-center gap-1.5" style={{ color: "rgba(212,201,168,0.6)" }}>
+                          <Crown className="w-3.5 h-3.5 shrink-0" style={{ color: colorForGuild(detail.owner.id) }} />
+                          <span className="truncate">Leader: <span className="text-white/80">{detail.owner.leader.name}</span></span>
+                        </div>
+                        <div className="flex items-center gap-1.5" style={{ color: "rgba(212,201,168,0.6)" }}>
+                          <Users className="w-3.5 h-3.5 shrink-0" style={{ color: colorForGuild(detail.owner.id) }} />
+                          <span>{detail.owner.memberCount} member{detail.owner.memberCount !== 1 ? "s" : ""}</span>
+                        </div>
+                        {detail.taxRate != null && (
+                          <div className="flex items-center gap-1.5" style={{ color: "rgba(212,201,168,0.6)" }}>
+                            <Shield className="w-3.5 h-3.5 shrink-0" style={{ color: colorForGuild(detail.owner.id) }} />
+                            <span>{detail.taxRate}% tax rate</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="rounded-xl p-4 text-center text-sm" style={{ background: "rgba(160,0,26,0.06)", border: "1px solid rgba(160,0,26,0.15)", color: "rgba(160,0,26,0.7)" }}>
+                      This territory is unclaimed. Use <span className="font-mono">.territory claim {detail.id}</span> in-bot to take it.
+                    </div>
+                  )}
+
+                  <div>
+                    <h3 className="text-[10px] font-mono font-bold tracking-[0.25em] uppercase mb-2 flex items-center gap-1.5" style={{ color: "rgba(160,0,26,0.6)" }}>
+                      <Swords className="w-3 h-3" /> War History
+                    </h3>
+                    {detail.warHistory.length === 0 ? (
+                      <p className="text-xs italic" style={{ color: "rgba(212,201,168,0.35)" }}>No recorded conquests for this territory yet.</p>
+                    ) : (
+                      <ul className="space-y-2">
+                        {detail.warHistory.map((h) => (
+                          <li key={h.id} className="text-xs rounded-lg p-2.5" style={{ background: "rgba(0,0,0,0.25)", border: "1px solid rgba(255,255,255,0.05)" }}>
+                            <p className="text-white/75">{h.title}</p>
+                            <p className="mt-0.5" style={{ color: "rgba(212,201,168,0.4)" }}>
+                              {new Date(h.timestamp * 1000).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })}
+                            </p>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                </>
+              )}
+
+              {!detailLoading && !detail && (
+                <p className="text-sm text-center py-8" style={{ color: "rgba(212,201,168,0.4)" }}>Couldn't load this territory's details.</p>
+              )}
+            </div>
+          </div>
         </div>
       )}
 
       {/* ── Coord label (flavour) ── */}
-      <div className="absolute bottom-5 left-1/2 -translate-x-1/2 z-20 font-mono text-[10px] tracking-widest pointer-events-none" style={{ color:"rgba(160,0,26,0.35)" }}>
-        REQUIEM ORDER WORLD ATLAS · 反逆 · v2.0
+      <div className="absolute bottom-5 left-1/2 -translate-x-1/2 z-20 font-mono text-[10px] tracking-widest pointer-events-none" style={{ color: "rgba(160,0,26,0.35)" }}>
+        REQUIEM ORDER WORLD ATLAS · 反逆 · v3.0
       </div>
     </div>
   );
 }
+
+export default World;

@@ -74,6 +74,7 @@ async function seedShopItems(): Promise<void> {
     { name: "Pistol", category: "tools", price: 15000, description: "Required to use .steal", effect: "unlock_steal" },
     { name: "Lottery Ticket", category: "general", price: 500, description: "Enter the weekly lottery draw", effect: "lottery_entry" },
     { name: "Health Pack", category: "rpg", price: 1500, description: "Fully restores HP outside dungeon", effect: "heal:full" },
+    { name: "Guild Scroll", category: "guild", price: 175000, description: "Required to found a guild with .guild create", effect: "unlock_guild" },
   ];
   const now2 = Math.floor(Date.now() / 1000);
   for (const item of newItems) {

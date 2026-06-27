@@ -3,6 +3,7 @@ import { sendText } from "../connection.js";
 import {
   getGuild, getUserGuild, createGuild, joinGuild, leaveGuild, getAllGuilds,
   getGuildMembers, kickFromGuild, disbandGuild, ensureUser, getUser, getMentionName,
+  removeFromInventory,
 } from "../db/queries.js";
 import { col } from "../db/mongo.js";
 import { generateId, mentionTag } from "../utils.js";
@@ -15,7 +16,7 @@ export async function handleGuilds(ctx: CommandContext): Promise<void> {
   const rpg = await col("rpg_characters").findOne({ user_id: userId });
 
   if (command !== "guild") {
-    await sendText(from, "❌ Usage: .guild [create/join/leave/info/list/desc/kick/disband]");
+    await sendText(from, "❌ Usage: .guild [create/join/leave/info/list/desc/kick/disband]\n_Creating a guild requires Level 20 and a Guild Scroll (.shop, $175,000)._");
     return;
   }
 
@@ -26,9 +27,19 @@ export async function handleGuilds(ctx: CommandContext): Promise<void> {
     const existing = await getUserGuild(userId);
     if (existing) { await sendText(from, "❌ You're already in a guild. Leave first with .guild leave"); return; }
     if (await getGuild(name)) { await sendText(from, "❌ A guild with that name already exists."); return; }
+
+    // A Guild Scroll (175,000 from .shop) is required and consumed on
+    // founding — this is the real scarcity gate on guild creation, not just
+    // a level requirement, matching how rare guild founding is meant to be.
+    const hadScroll = await removeFromInventory(userId, "Guild Scroll", 1);
+    if (!hadScroll) {
+      await sendText(from, "❌ You need a *Guild Scroll* to found a guild. Buy one from *.shop* for $175,000.");
+      return;
+    }
+
     const guildId = generateId(8);
     await createGuild(guildId, name, sender);
-    await sendText(from, `🏰 Guild *${name}* created! You are the owner.`);
+    await sendText(from, `🏰 Guild *${name}* founded with a Guild Scroll! You are the owner.`);
     return;
   }
 

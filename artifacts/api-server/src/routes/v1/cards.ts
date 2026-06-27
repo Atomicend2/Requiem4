@@ -6,6 +6,7 @@ import https from "https";
 import http from "http";
 import { fileURLToPath } from "url";
 import { requireAuth, optionalAuth, type AuthRequest } from "./middleware.js";
+import { requireAdminAccess } from "./admin.js";
 import { col } from "../../bot/db/mongo.js";
 import { getSocket, isSocketConnected } from "../../bot/connection.js";
 import { getStaff, getUserCards, deleteUserCardByCopyId, giveCard } from "../../bot/db/queries.js";
@@ -230,7 +231,7 @@ router.get("/detail/:id", async (req, res) => {
 });
 
 // ── Reload cards from JSON ────────────────────────────────────────────────────
-router.post("/reload-from-json", requireAuth, async (req: AuthRequest, res) => {
+router.post("/reload-from-json", requireAdminAccess as any, async (req: AuthRequest, res) => {
   try {
     const { loadCardsFromRepo } = await import("../../bot/cards-loader.js");
     const stats = await loadCardsFromRepo();
