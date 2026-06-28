@@ -93,8 +93,12 @@ function colorForGuild(guildId: string) {
 
 const MAP_W = 1408;
 const MAP_H = 768;
-const MIN_ZOOM = 1;
 const MAX_ZOOM = 4;
+// MIN_ZOOM is no longer a fixed constant — it's computed per-viewport below,
+// since a phone screen is much narrower than the 1408px map canvas. With a
+// hardcoded floor of 1 (100%), mobile users could never zoom OUT far enough
+// to see the whole map at once; "1" only happened to look right on a
+// laptop/tablet viewport that's already wider than the map itself.
 
 export default function World() {
   const [data, setData] = useState<{ continents: ContinentInfo[]; regions: RegionInfo[]; territories: Territory[] } | null>(null);
@@ -109,9 +113,59 @@ export default function World() {
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
+  const [minZoom, setMinZoom] = useState(1);
+  const userInteractedRef = useRef(false);
   const dragState = useRef<{ dragging: boolean; startX: number; startY: number; panX: number; panY: number; moved: boolean }>({
     dragging: false, startX: 0, startY: 0, panX: 0, panY: 0, moved: false,
   });
+  // Tracks every currently-active pointer (finger) by id, so we can tell a
+  // one-finger drag apart from a two-finger pinch. A plain mouse/single
+  // touch only ever has one entry here; pinch-to-zoom kicks in the moment a
+  // second one shows up.
+  const activePointers = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const pinchState = useRef<{ startDist: number; startZoom: number; midX: number; midY: number } | null>(null);
+
+  // Compute the zoom level that fits the entire MAP_W x MAP_H canvas inside
+  // the current viewport, and use that as the floor for how far out you can
+  // zoom (capped at 1 so we never force an upscale on a viewport that's
+  // already bigger than the map). Re-run whenever the viewport resizes
+  // (rotating a phone, resizing a browser window) so the floor stays correct.
+  const computeFitZoom = useCallback(() => {
+    const vp = viewportRef.current;
+    if (!vp) return 1;
+    const vw = vp.clientWidth;
+    const vh = vp.clientHeight;
+    if (!vw || !vh) return 1;
+    return Math.min(1, vw / MAP_W, vh / MAP_H);
+  }, []);
+
+  const fitToViewport = useCallback(() => {
+    const vp = viewportRef.current;
+    const fit = computeFitZoom();
+    setMinZoom(fit);
+    if (!vp) { setZoom(fit); setPan({ x: 0, y: 0 }); return; }
+    const vw = vp.clientWidth;
+    const vh = vp.clientHeight;
+    // Center the (possibly letterboxed) map in the viewport at the fit zoom.
+    const x = Math.min(0, (vw - MAP_W * fit) / 2);
+    const y = Math.min(0, (vh - MAP_H * fit) / 2);
+    setZoom(fit);
+    setPan({ x, y });
+  }, [computeFitZoom]);
+
+  useEffect(() => {
+    fitToViewport();
+    const vp = viewportRef.current;
+    if (!vp || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => {
+      // Don't yank the view out from under someone mid-interaction — only
+      // auto-refit while they haven't manually zoomed/panned yet.
+      if (!userInteractedRef.current) fitToViewport();
+    });
+    ro.observe(vp);
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const clampPan = useCallback((nextZoom: number, nextPan: { x: number; y: number }) => {
     const vp = viewportRef.current;
@@ -120,14 +174,19 @@ export default function World() {
     const vh = vp.clientHeight;
     const scaledW = MAP_W * nextZoom;
     const scaledH = MAP_H * nextZoom;
+    // If the scaled map is smaller than the viewport on an axis (letterboxed
+    // at the fit zoom), center it on that axis instead of pinning to 0 —
+    // otherwise it sticks to the top/left with empty space only on one side.
     const minX = Math.min(0, vw - scaledW);
     const minY = Math.min(0, vh - scaledH);
-    return { x: Math.max(minX, Math.min(0, nextPan.x)), y: Math.max(minY, Math.min(0, nextPan.y)) };
+    const x = scaledW <= vw ? (vw - scaledW) / 2 : Math.max(minX, Math.min(0, nextPan.x));
+    const y = scaledH <= vh ? (vh - scaledH) / 2 : Math.max(minY, Math.min(0, nextPan.y));
+    return { x, y };
   }, []);
 
   const zoomTo = useCallback((nextZoom: number, focalX?: number, focalY?: number) => {
     const vp = viewportRef.current;
-    const clamped = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, nextZoom));
+    const clamped = Math.max(minZoom, Math.min(MAX_ZOOM, nextZoom));
     setZoom((prevZoom) => {
       if (!vp) return clamped;
       const fx = focalX ?? vp.clientWidth / 2;
@@ -139,12 +198,13 @@ export default function World() {
       });
       return clamped;
     });
-  }, [clampPan]);
+  }, [clampPan, minZoom]);
 
-  const resetView = useCallback(() => { setZoom(1); setPan({ x: 0, y: 0 }); }, []);
+  const resetView = useCallback(() => { userInteractedRef.current = false; fitToViewport(); }, [fitToViewport]);
 
   const onWheel = useCallback((e: React.WheelEvent) => {
     e.preventDefault();
+    userInteractedRef.current = true;
     const vp = viewportRef.current;
     if (!vp) return;
     const rect = vp.getBoundingClientRect();
@@ -155,12 +215,41 @@ export default function World() {
   }, [zoom, zoomTo]);
 
   const onPointerDown = useCallback((e: React.PointerEvent) => {
-    dragState.current = { dragging: true, startX: e.clientX, startY: e.clientY, panX: pan.x, panY: pan.y, moved: false };
-    setIsDragging(true);
+    userInteractedRef.current = true;
     (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+    activePointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (activePointers.current.size === 2) {
+      // Second finger just landed — switch from drag to pinch-zoom.
+      dragState.current.dragging = false;
+      const pts = [...activePointers.current.values()];
+      const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+      const vp = viewportRef.current;
+      const rect = vp?.getBoundingClientRect();
+      pinchState.current = {
+        startDist: dist,
+        startZoom: zoom,
+        midX: (pts[0].x + pts[1].x) / 2 - (rect?.left ?? 0),
+        midY: (pts[0].y + pts[1].y) / 2 - (rect?.top ?? 0),
+      };
+    } else if (activePointers.current.size === 1) {
+      dragState.current = { dragging: true, startX: e.clientX, startY: e.clientY, panX: pan.x, panY: pan.y, moved: false };
+      setIsDragging(true);
+    }
   }, [pan]);
 
   const onPointerMove = useCallback((e: React.PointerEvent) => {
+    if (!activePointers.current.has(e.pointerId)) return;
+    activePointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (activePointers.current.size === 2 && pinchState.current) {
+      const pts = [...activePointers.current.values()];
+      const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+      const scale = dist / Math.max(1, pinchState.current.startDist);
+      zoomTo(pinchState.current.startZoom * scale, pinchState.current.midX, pinchState.current.midY);
+      return;
+    }
+
     if (!dragState.current.dragging) return;
     const dx = e.clientX - dragState.current.startX;
     const dy = e.clientY - dragState.current.startY;
@@ -168,10 +257,19 @@ export default function World() {
     setPan(clampPan(zoom, { x: dragState.current.panX + dx, y: dragState.current.panY + dy }));
   }, [zoom, clampPan]);
 
-  const onPointerUp = useCallback(() => {
-    dragState.current.dragging = false;
-    setIsDragging(false);
-  }, []);
+  const onPointerUp = useCallback((e: React.PointerEvent) => {
+    activePointers.current.delete(e.pointerId);
+    pinchState.current = null;
+    if (activePointers.current.size === 1) {
+      // Dropped from a pinch back down to one finger — resume dragging
+      // from here instead of jumping.
+      const [[, pt]] = activePointers.current;
+      dragState.current = { dragging: true, startX: pt.x, startY: pt.y, panX: pan.x, panY: pan.y, moved: false };
+    } else {
+      dragState.current.dragging = false;
+      setIsDragging(false);
+    }
+  }, [pan]);
 
   useEffect(() => {
     let mounted = true;
@@ -253,6 +351,7 @@ export default function World() {
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
           onPointerLeave={onPointerUp}
         >
           <div
@@ -323,10 +422,10 @@ export default function World() {
           </div>
 
           <div className="absolute bottom-3 left-3 sm:bottom-6 sm:left-6 z-30 flex flex-col gap-1 sm:gap-1.5 pointer-events-auto">
-            <button onClick={() => zoomTo(zoom + 0.5)} className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg flex items-center justify-center text-white/70 hover:text-white transition-colors" style={{ background: "rgba(17,17,23,0.85)", border: "1px solid rgba(160,0,26,0.2)" }} title="Zoom in">
+            <button onClick={() => { userInteractedRef.current = true; zoomTo(zoom + 0.5); }} className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg flex items-center justify-center text-white/70 hover:text-white transition-colors" style={{ background: "rgba(17,17,23,0.85)", border: "1px solid rgba(160,0,26,0.2)" }} title="Zoom in">
               <ZoomIn className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
             </button>
-            <button onClick={() => zoomTo(zoom - 0.5)} className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg flex items-center justify-center text-white/70 hover:text-white transition-colors" style={{ background: "rgba(17,17,23,0.85)", border: "1px solid rgba(160,0,26,0.2)" }} title="Zoom out">
+            <button onClick={() => { userInteractedRef.current = true; zoomTo(zoom - 0.5); }} className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg flex items-center justify-center text-white/70 hover:text-white transition-colors" style={{ background: "rgba(17,17,23,0.85)", border: "1px solid rgba(160,0,26,0.2)" }} title="Zoom out">
               <ZoomOut className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
             </button>
             <button onClick={resetView} className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg flex items-center justify-center text-white/70 hover:text-white transition-colors" style={{ background: "rgba(17,17,23,0.85)", border: "1px solid rgba(160,0,26,0.2)" }} title="Reset view">

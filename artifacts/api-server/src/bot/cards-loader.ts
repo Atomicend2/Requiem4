@@ -313,22 +313,19 @@ async function loadCardsFromRepoInner(opts: { force?: boolean } = {}): Promise<{
 
   const stream = isJsonl ? streamJsonl(filePath) : streamCardsJson(filePath);
 
-  // Track seen image URLs to eliminate duplicate cards that share the same image
-  const seenImageUrls = new Set<string>();
-  // Pre-load existing image URLs from MongoDB to avoid re-importing duplicates
-  try {
-    const existingUrls = await col("cards").find(
-      { image_url: { $ne: null } },
-      { projection: { image_url: 1 } }
-    ).toArray();
-    for (const doc of existingUrls) {
-      if (doc.image_url) seenImageUrls.add(doc.image_url);
-    }
-    logger.info({ seenCount: seenImageUrls.size }, "Pre-loaded existing image URLs for dedup");
-  } catch (e: any) {
-    logger.warn({ e: e.message }, "Could not pre-load image URLs for dedup (non-fatal)");
-  }
-
+  // NOTE: true duplicate elimination (same shoob_id, same mazoku_id, or same
+  // name+series+tier+file_hash content) already happens once, upstream, in
+  // merge_cards.js when unified_cards.jsonl is generated. There used to be a
+  // second, redundant dedup pass here that skipped any incoming card whose
+  // image_url already existed in the database — but that ran BEFORE the
+  // upsert logic below, so it intercepted every already-imported card before
+  // it could ever be matched against the upsert-by-id path and have its
+  // fields refreshed. In practice this meant every existing card was always
+  // counted as "skipped" and never "updated", no matter what changed in the
+  // source file (tier fixes, event tags, etc. never propagated to cards that
+  // were already in Mongo). Removed — the upsert keyed on shoob_id/mazoku_id
+  // below is the single source of truth for "is this card new or existing",
+  // and it's what actually updates a changed card's fields.
   const BATCH = 50;
   let batch: any[] = [];
 
@@ -341,14 +338,6 @@ async function loadCardsFromRepoInner(opts: { force?: boolean } = {}): Promise<{
 
       const pid = card._primaryId;
       delete card._primaryId;
-
-      // Deduplicate by image_url — skip cards whose URL we've already seen
-      const cardImageUrl = card.image_url as string | null;
-      if (cardImageUrl && seenImageUrls.has(cardImageUrl)) {
-        stats.skipped++;
-        continue;
-      }
-      if (cardImageUrl) seenImageUrls.add(cardImageUrl);
 
       // Upsert keyed on the card's own shoob_id/mazoku_id (NOT a randomly
       // generated local id, and NOT a separate tracking collection). This is
