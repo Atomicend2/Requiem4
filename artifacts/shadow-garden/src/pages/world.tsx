@@ -266,7 +266,7 @@ export default function World() {
             }}
           >
             <img
-              src="/images/world-map.png"
+              src="/images/world-map.svg"
               alt="World map"
               draggable={false}
               className="absolute inset-0 w-full h-full object-cover pointer-events-none select-none"

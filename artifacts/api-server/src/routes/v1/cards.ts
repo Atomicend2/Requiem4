@@ -234,11 +234,45 @@ router.get("/detail/:id", async (req, res) => {
 router.post("/reload-from-json", requireAdminAccess as any, async (req: AuthRequest, res) => {
   try {
     const { loadCardsFromRepo } = await import("../../bot/cards-loader.js");
-    const stats = await loadCardsFromRepo();
+    const stats = await loadCardsFromRepo({ force: true });
+    if (stats.fileNotFound) {
+      res.status(404).json({
+        success: false,
+        message: "Could not find unified_cards.jsonl or cards.json on the server's filesystem. Check that the file was actually committed and deployed.",
+        ...stats,
+      });
+      return;
+    }
     res.json({ success: true, ...stats });
   } catch (err: any) {
     logger.error({ err }, "reload-from-json error");
     res.status(500).json({ success: false, message: err?.message || "Reload failed" });
+  }
+});
+
+// ── Wipe the cards collection entirely ────────────────────────────────────────
+// Last-resort recovery tool: if the card database ever gets stuck in a state
+// a normal re-sync can't fix (e.g. corrupted documents, a sync that partially
+// completed in a broken way), this clears every card document so the next
+// sync starts from a genuinely empty collection instead of reconciling
+// against whatever is already there. Deliberately scoped to ONLY the `cards`
+// collection — never touches users, guilds, inventories, owned cards
+// (user_cards), or anything else. Does NOT delete cards players already own;
+// those live in a separate collection untouched by this.
+router.post("/wipe-cards", requireAdminAccess as any, async (req: AuthRequest, res) => {
+  try {
+    const result = await col("cards").deleteMany({});
+    // Also clear the sync bookkeeping so the very next sync (auto or
+    // manual) can't fast-skip thinking nothing changed.
+    await col("sync_meta").deleteMany({});
+    res.json({
+      success: true,
+      message: `Wiped ${result.deletedCount ?? 0} card document(s) from the database. Owned cards (user_cards) were not touched. Run a sync now to repopulate from unified_cards.jsonl.`,
+      deleted: result.deletedCount ?? 0,
+    });
+  } catch (err: any) {
+    logger.error({ err }, "wipe-cards error");
+    res.status(500).json({ success: false, message: err?.message || "Wipe failed" });
   }
 });
 

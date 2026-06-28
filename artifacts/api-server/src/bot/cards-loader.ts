@@ -129,8 +129,8 @@ function normaliseCard(raw: any, isJsonl: boolean): any | null {
 }
 
 /* ── Main export ───────────────────────────────────────────────────────── */
-export async function loadCardsFromRepo(): Promise<{ imported: number; updated: number; skipped: number }> {
-  const stats = { imported: 0, updated: 0, skipped: 0 };
+export async function loadCardsFromRepo(opts: { force?: boolean } = {}): Promise<{ imported: number; updated: number; skipped: number; fileNotFound?: boolean; resolvedPath?: string }> {
+  const stats: { imported: number; updated: number; skipped: number; fileNotFound?: boolean; resolvedPath?: string } = { imported: 0, updated: 0, skipped: 0 };
 
   // Prefer unified JSONL; fall back to legacy cards.json
   const jsonlPath = resolveFile(["unified_cards.jsonl"]);
@@ -139,18 +139,31 @@ export async function loadCardsFromRepo(): Promise<{ imported: number; updated: 
   const isJsonl   = !!jsonlPath;
 
   if (!filePath) {
-    logger.warn("Neither unified_cards.jsonl nor cards.json found — skipping card loader");
+    logger.warn(
+      { triedRoots: [path.resolve(__dirname, "../../../"), path.resolve(__dirname, "../../../../"), process.cwd(), path.resolve(process.cwd(), "../../")] },
+      "Neither unified_cards.jsonl nor cards.json found — skipping card loader"
+    );
+    stats.fileNotFound = true;
     return stats;
   }
+  stats.resolvedPath = filePath;
 
   const metaKey = isJsonl ? "unified_jsonl" : "shoob_json";
-  logger.info({ filePath, isJsonl }, "Card loader starting");
+  logger.info({ filePath, isJsonl, force: !!opts.force }, "Card loader starting");
 
-  /* Fast-skip: file unchanged and DB already populated */
+  /* Fast-skip: file unchanged and DB already populated. This only applies
+   * to the automatic boot-time sync — its entire purpose is to avoid
+   * redoing a full pass on every restart when nothing changed. An explicit
+   * manual re-sync (opts.force) must NEVER hit this shortcut: matching file
+   * size is a weak signal on its own (two different file contents can land
+   * on the same byte count, and more importantly, an admin pressing "sync
+   * now" is explicitly asking to verify and reconcile state regardless of
+   * what the last recorded size was — silently no-op'ing on that request
+   * is exactly what made the sync button look broken). */
   let fileSize = 0;
   try { fileSize = fs.statSync(filePath).size; } catch {}
 
-  if (fileSize > 0) {
+  if (!opts.force && fileSize > 0) {
     const meta = await col("sync_meta").findOne({ _id: metaKey as any }).catch(() => null);
     if (meta && meta.file_size === fileSize && meta.imported_count > 0) {
       logger.info({ importedCount: meta.imported_count }, "Card file unchanged — skipping sync");

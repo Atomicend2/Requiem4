@@ -1136,7 +1136,7 @@ function CardSyncPanel() {
   const [eventCount, setEventCount] = useState<number | null>(null);
   const [countLoading, setCountLoading] = useState(false);
 
-  const authHeader = token ? { Authorization: `Bearer ${token}` } : {};
+  const authHeader: HeadersInit = token ? { Authorization: `Bearer ${token}` } : {};
 
   const fetchCount = async () => {
     setCountLoading(true);
@@ -1184,6 +1184,34 @@ function CardSyncPanel() {
     }
   };
 
+  const [wiping, setWiping] = useState(false);
+  const handleWipe = async () => {
+    if (!window.confirm(
+      "This will permanently delete every card document from the database (not cards players already own — just the catalog). " +
+      "Only do this if a normal re-sync isn't fixing a stuck count. Continue?"
+    )) return;
+    setWiping(true);
+    try {
+      const res = await fetch("/api/v1/cards/wipe-cards", { method: "POST", headers: { ...authHeader } });
+      const j = await res.json();
+      toast({
+        title: j.success ? "🗑️ Cards Wiped" : "❌ Wipe Failed",
+        description: j.message,
+        variant: j.success ? undefined : "destructive",
+      });
+      if (j.success) {
+        await fetchCount();
+        // Immediately re-sync from the now-empty state, so the database
+        // doesn't sit empty waiting for a separate manual step.
+        await handleSync();
+      }
+    } catch (e: any) {
+      toast({ title: "Error", description: e?.message || "Request failed", variant: "destructive" });
+    } finally {
+      setWiping(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <section className="glass-card rounded-xl p-6 border border-white/8">
@@ -1215,9 +1243,18 @@ function CardSyncPanel() {
           </Button>
         </div>
 
-        <Button onClick={handleSync} disabled={syncing} className="bg-primary hover:bg-primary/90">
-          {syncing ? "Syncing…" : "Re-sync Now from unified_cards.jsonl"}
-        </Button>
+        <div className="flex items-center gap-3">
+          <Button onClick={handleSync} disabled={syncing || wiping} className="bg-primary hover:bg-primary/90">
+            {syncing ? "Syncing…" : "Re-sync Now from unified_cards.jsonl"}
+          </Button>
+          <Button onClick={handleWipe} disabled={syncing || wiping} variant="outline" className="border-rose-500/40 text-rose-400 hover:bg-rose-500/10">
+            {wiping ? "Wiping…" : "⚠️ Wipe & Re-sync"}
+          </Button>
+        </div>
+        <p className="text-[11px] text-muted-foreground/70 mt-2">
+          Only use "Wipe & Re-sync" if a normal re-sync keeps showing 0 imported/updated despite the file having changed — it clears the card catalog
+          completely (never touches cards players already own) and immediately rebuilds it from scratch.
+        </p>
 
         {lastResult && (
           <div className="mt-4 text-sm text-muted-foreground border-t border-white/8 pt-4">
