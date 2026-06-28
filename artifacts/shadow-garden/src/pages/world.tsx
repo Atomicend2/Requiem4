@@ -225,10 +225,10 @@ export default function World() {
   return (
     <div className="min-h-screen relative overflow-hidden flex flex-col bg-[#05050a]">
 
-      <div className="relative z-20 p-6 md:p-8 pointer-events-none" style={{ background: "linear-gradient(to bottom, rgba(0,0,0,0.65), transparent)" }}>
-        <p className="font-mono tracking-[0.5em] text-xs uppercase mb-1" style={{ color:"rgba(160,0,26,0.4)" }}>反逆</p>
-        <h1 className="font-serif text-3xl md:text-5xl font-bold text-white tracking-widest uppercase neon-text-sky">Requiem Order World Atlas</h1>
-        <p className="mt-2 max-w-xl text-sm" style={{ color:"rgba(212,201,168,0.45)" }}>
+      <div className="relative z-20 p-4 sm:p-6 md:p-8 pointer-events-none" style={{ background: "linear-gradient(to bottom, rgba(0,0,0,0.65), transparent)" }}>
+        <p className="font-mono tracking-[0.3em] sm:tracking-[0.5em] text-[10px] sm:text-xs uppercase mb-1" style={{ color:"rgba(160,0,26,0.4)" }}>反逆</p>
+        <h1 className="font-serif text-xl sm:text-3xl md:text-5xl font-bold text-white tracking-wide sm:tracking-widest uppercase neon-text-sky">Requiem Order World Atlas</h1>
+        <p className="hidden sm:block mt-2 max-w-xl text-sm" style={{ color:"rgba(212,201,168,0.45)" }}>
           Live territory control across the known world. Claim territory in-bot with <span className="font-mono">.territory claim</span> and it appears here. Scroll to zoom, drag to pan, click a marker for details.
         </p>
       </div>
@@ -322,26 +322,26 @@ export default function World() {
             })}
           </div>
 
-          <div className="absolute bottom-6 left-6 z-30 flex flex-col gap-1.5 pointer-events-auto">
-            <button onClick={() => zoomTo(zoom + 0.5)} className="w-9 h-9 rounded-lg flex items-center justify-center text-white/70 hover:text-white transition-colors" style={{ background: "rgba(17,17,23,0.85)", border: "1px solid rgba(160,0,26,0.2)" }} title="Zoom in">
-              <ZoomIn className="w-4 h-4" />
+          <div className="absolute bottom-3 left-3 sm:bottom-6 sm:left-6 z-30 flex flex-col gap-1 sm:gap-1.5 pointer-events-auto">
+            <button onClick={() => zoomTo(zoom + 0.5)} className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg flex items-center justify-center text-white/70 hover:text-white transition-colors" style={{ background: "rgba(17,17,23,0.85)", border: "1px solid rgba(160,0,26,0.2)" }} title="Zoom in">
+              <ZoomIn className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
             </button>
-            <button onClick={() => zoomTo(zoom - 0.5)} className="w-9 h-9 rounded-lg flex items-center justify-center text-white/70 hover:text-white transition-colors" style={{ background: "rgba(17,17,23,0.85)", border: "1px solid rgba(160,0,26,0.2)" }} title="Zoom out">
-              <ZoomOut className="w-4 h-4" />
+            <button onClick={() => zoomTo(zoom - 0.5)} className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg flex items-center justify-center text-white/70 hover:text-white transition-colors" style={{ background: "rgba(17,17,23,0.85)", border: "1px solid rgba(160,0,26,0.2)" }} title="Zoom out">
+              <ZoomOut className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
             </button>
-            <button onClick={resetView} className="w-9 h-9 rounded-lg flex items-center justify-center text-white/70 hover:text-white transition-colors" style={{ background: "rgba(17,17,23,0.85)", border: "1px solid rgba(160,0,26,0.2)" }} title="Reset view">
-              <Maximize2 className="w-4 h-4" />
+            <button onClick={resetView} className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg flex items-center justify-center text-white/70 hover:text-white transition-colors" style={{ background: "rgba(17,17,23,0.85)", border: "1px solid rgba(160,0,26,0.2)" }} title="Reset view">
+              <Maximize2 className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
             </button>
           </div>
         </div>
       )}
 
       {!loading && !error && (
-        <div className="absolute z-20 p-4 rounded-xl" style={{ bottom:24, right:24, background:"rgba(17,17,23,0.85)", border:"1px solid rgba(160,0,26,0.15)", boxShadow:"0 0 20px rgba(160,0,26,0.08)" }}>
-          <h4 className="text-[10px] font-mono font-bold tracking-[0.3em] uppercase pb-2 mb-3" style={{ color:"rgba(160,0,26,0.5)", borderBottom:"1px solid rgba(255,255,255,0.06)" }}>
+        <div className="absolute z-20 p-2.5 sm:p-4 rounded-lg sm:rounded-xl max-w-[140px] sm:max-w-none bottom-3 right-3 sm:bottom-6 sm:right-6" style={{ background:"rgba(17,17,23,0.85)", border:"1px solid rgba(160,0,26,0.15)", boxShadow:"0 0 20px rgba(160,0,26,0.08)" }}>
+          <h4 className="text-[8px] sm:text-[10px] font-mono font-bold tracking-[0.15em] sm:tracking-[0.3em] uppercase pb-1.5 sm:pb-2 mb-2 sm:mb-3" style={{ color:"rgba(160,0,26,0.5)", borderBottom:"1px solid rgba(255,255,255,0.06)" }}>
             Guild Control
           </h4>
-          <ul className="space-y-2 text-xs text-white/70 max-h-48 overflow-y-auto pr-1">
+          <ul className="space-y-1.5 sm:space-y-2 text-[10px] sm:text-xs text-white/70 max-h-32 sm:max-h-48 overflow-y-auto pr-1">
             {activeGuilds.length === 0 && <li className="text-white/40 italic">No territories claimed yet</li>}
             {activeGuilds.map((g) => {
               const style = colorForGuild(g.id);

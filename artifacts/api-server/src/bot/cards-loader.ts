@@ -129,7 +129,65 @@ function normaliseCard(raw: any, isJsonl: boolean): any | null {
 }
 
 /* ── Main export ───────────────────────────────────────────────────────── */
+/* ── Sync state — single source of truth for "is a sync currently running"
+ * and live progress. This is what makes concurrent syncs impossible: if a
+ * sync is already in flight (whether triggered at boot or by an admin
+ * pressing the button, possibly more than once because the first request
+ * looked like it hung), a second call returns the in-progress state instead
+ * of starting a second, fully independent pass against the same
+ * collection. Two unguarded syncs racing against each other — each running
+ * its own duplicate-cleanup pass and its own import snapshot at a different
+ * moment — is what produced wildly inconsistent partial counts and
+ * documents getting tagged inconsistently when this didn't exist. ── */
+export type SyncState = {
+  running: boolean;
+  startedAt: number | null;
+  finishedAt: number | null;
+  processed: number;
+  total: number;
+  lastResult: { imported: number; updated: number; skipped: number; fileNotFound?: boolean; resolvedPath?: string } | null;
+  lastError: string | null;
+};
+
+const syncState: SyncState = {
+  running: false,
+  startedAt: null,
+  finishedAt: null,
+  processed: 0,
+  total: 0,
+  lastResult: null,
+  lastError: null,
+};
+
+export function getSyncState(): SyncState {
+  return { ...syncState };
+}
+
 export async function loadCardsFromRepo(opts: { force?: boolean } = {}): Promise<{ imported: number; updated: number; skipped: number; fileNotFound?: boolean; resolvedPath?: string }> {
+  if (syncState.running) {
+    logger.warn("loadCardsFromRepo called while a sync is already running — ignoring this call and returning the existing run's state");
+    return syncState.lastResult || { imported: 0, updated: 0, skipped: 0 };
+  }
+  syncState.running = true;
+  syncState.startedAt = Date.now();
+  syncState.finishedAt = null;
+  syncState.processed = 0;
+  syncState.total = 0;
+  syncState.lastError = null;
+  try {
+    const result = await loadCardsFromRepoInner(opts);
+    syncState.lastResult = result;
+    return result;
+  } catch (e: any) {
+    syncState.lastError = e?.message || String(e);
+    throw e;
+  } finally {
+    syncState.running = false;
+    syncState.finishedAt = Date.now();
+  }
+}
+
+async function loadCardsFromRepoInner(opts: { force?: boolean } = {}): Promise<{ imported: number; updated: number; skipped: number; fileNotFound?: boolean; resolvedPath?: string }> {
   const stats: { imported: number; updated: number; skipped: number; fileNotFound?: boolean; resolvedPath?: string } = { imported: 0, updated: 0, skipped: 0 };
 
   // Prefer unified JSONL; fall back to legacy cards.json
@@ -162,6 +220,11 @@ export async function loadCardsFromRepo(opts: { force?: boolean } = {}): Promise
    * is exactly what made the sync button look broken). */
   let fileSize = 0;
   try { fileSize = fs.statSync(filePath).size; } catch {}
+  // Rough estimate for progress reporting only — average observed line
+  // length in unified_cards.jsonl is ~430 bytes. Exact precision doesn't
+  // matter here, this just gives the admin panel something to show a
+  // percentage against instead of leaving "processed" with no context.
+  syncState.total = fileSize > 0 ? Math.round(fileSize / 430) : 0;
 
   if (!opts.force && fileSize > 0) {
     const meta = await col("sync_meta").findOne({ _id: metaKey as any }).catch(() => null);
@@ -357,6 +420,7 @@ export async function loadCardsFromRepo(opts: { force?: boolean } = {}): Promise
   let totalSeen = 0;
   for await (const raw of stream) {
     totalSeen++;
+    syncState.processed = totalSeen;
     batch.push(raw);
     if (batch.length >= BATCH) await processBatch();
   }

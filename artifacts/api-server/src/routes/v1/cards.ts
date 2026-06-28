@@ -233,20 +233,40 @@ router.get("/detail/:id", async (req, res) => {
 // ── Reload cards from JSON ────────────────────────────────────────────────────
 router.post("/reload-from-json", requireAdminAccess as any, async (req: AuthRequest, res) => {
   try {
-    const { loadCardsFromRepo } = await import("../../bot/cards-loader.js");
-    const stats = await loadCardsFromRepo({ force: true });
-    if (stats.fileNotFound) {
-      res.status(404).json({
-        success: false,
-        message: "Could not find unified_cards.jsonl or cards.json on the server's filesystem. Check that the file was actually committed and deployed.",
-        ...stats,
-      });
+    const { loadCardsFromRepo, getSyncState } = await import("../../bot/cards-loader.js");
+    const already = getSyncState();
+    if (already.running) {
+      res.json({ success: true, alreadyRunning: true, message: "A sync is already running — check status instead of starting a new one." });
       return;
     }
-    res.json({ success: true, ...stats });
+
+    // Fire and forget: a full sync of 50k+ cards can take well over a
+    // minute, comfortably past most reverse-proxy request timeouts
+    // (Render's included). Holding the HTTP response open for that whole
+    // time is what made the button look broken — the connection would get
+    // killed mid-sync, the admin would see nothing and press it again, and
+    // that second press used to start a fully independent second sync
+    // racing the first. Returning immediately and letting the frontend
+    // poll /reload-status instead sidesteps that timeout entirely.
+    loadCardsFromRepo({ force: true }).catch((err) => {
+      logger.error({ err }, "Background card sync failed");
+    });
+
+    res.json({ success: true, started: true, message: "Sync started in the background — poll /api/v1/cards/reload-status for progress." });
   } catch (err: any) {
     logger.error({ err }, "reload-from-json error");
     res.status(500).json({ success: false, message: err?.message || "Reload failed" });
+  }
+});
+
+// ── Poll sync progress ────────────────────────────────────────────────────────
+router.get("/reload-status", requireAdminAccess as any, async (req: AuthRequest, res) => {
+  try {
+    const { getSyncState } = await import("../../bot/cards-loader.js");
+    const state = getSyncState();
+    res.json({ success: true, ...state });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || "Could not read sync status" });
   }
 });
 

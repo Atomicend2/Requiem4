@@ -1159,27 +1159,75 @@ function CardSyncPanel() {
 
   useEffect(() => { fetchCount(); }, []);
 
+  const [syncStatus, setSyncStatus] = useState<any>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const pollStatus = async () => {
+    try {
+      const res = await fetch("/api/v1/cards/reload-status", { headers: authHeader });
+      const j = await res.json();
+      setSyncStatus(j);
+      if (!j.running) {
+        if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+        setSyncing(false);
+        if (j.lastError) {
+          toast({ title: "❌ Sync Failed", description: j.lastError, variant: "destructive" });
+        } else if (j.lastResult) {
+          setLastResult({ success: true, ...j.lastResult });
+          toast({ title: "✅ Sync Complete", description: `Imported ${j.lastResult.imported ?? 0}, updated ${j.lastResult.updated ?? 0}, skipped ${j.lastResult.skipped ?? 0}.` });
+        }
+        fetchCount();
+      }
+    } catch {
+      // transient — keep polling, don't tear down on one failed check
+    }
+  };
+
+  useEffect(() => {
+    // On mount, check if a sync is already running (e.g. the admin
+    // reloaded the page mid-sync) and resume polling instead of letting
+    // them think nothing is happening.
+    (async () => {
+      try {
+        const res = await fetch("/api/v1/cards/reload-status", { headers: authHeader });
+        const j = await res.json();
+        if (j.running) {
+          setSyncing(true);
+          setSyncStatus(j);
+          pollRef.current = setInterval(pollStatus, 2000);
+        }
+      } catch { /* ignore */ }
+    })();
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handleSync = async () => {
     setSyncing(true);
     setLastResult(null);
+    setSyncStatus(null);
     try {
       const res = await fetch("/api/v1/cards/reload-from-json", {
         method: "POST",
         headers: { ...authHeader },
       });
       const j = await res.json();
-      setLastResult(j);
-      toast({
-        title: j.success ? "✅ Sync Complete" : "❌ Sync Failed",
-        description: j.success
-          ? `Imported ${j.imported ?? 0}, updated ${j.updated ?? 0}, skipped ${j.skipped ?? 0}.`
-          : (j.message || "Reload failed."),
-        variant: j.success ? undefined : "destructive",
-      });
-      if (j.success) fetchCount();
+      if (j.alreadyRunning) {
+        toast({ title: "Sync already running", description: "Tracking the in-progress sync instead of starting a new one." });
+      } else if (!j.success) {
+        toast({ title: "❌ Sync Failed", description: j.message || "Reload failed.", variant: "destructive" });
+        setSyncing(false);
+        return;
+      }
+      // The request returns immediately now — the actual sync runs in the
+      // background on the server. Poll for progress instead of waiting on
+      // this one request, which is what used to time out on anything but
+      // a tiny card catalog.
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = setInterval(pollStatus, 2000);
+      pollStatus();
     } catch (e: any) {
       toast({ title: "Error", description: e?.message || "Request failed", variant: "destructive" });
-    } finally {
       setSyncing(false);
     }
   };
@@ -1201,15 +1249,16 @@ function CardSyncPanel() {
       });
       if (j.success) {
         await fetchCount();
-        // Immediately re-sync from the now-empty state, so the database
-        // doesn't sit empty waiting for a separate manual step.
-        await handleSync();
+        setWiping(false);
+        // Kick off the re-sync the same fire-and-poll way as the normal
+        // button, rather than awaiting one long-lived request.
+        handleSync();
+        return;
       }
     } catch (e: any) {
       toast({ title: "Error", description: e?.message || "Request failed", variant: "destructive" });
-    } finally {
-      setWiping(false);
     }
+    setWiping(false);
   };
 
   return (
@@ -1256,7 +1305,24 @@ function CardSyncPanel() {
           completely (never touches cards players already own) and immediately rebuilds it from scratch.
         </p>
 
-        {lastResult && (
+        {syncing && syncStatus?.running && (
+          <div className="mt-4 pt-4 border-t border-white/8">
+            <div className="flex items-center justify-between text-xs text-muted-foreground mb-1.5">
+              <span>Syncing — this can take a few minutes for the full catalog, no need to press the button again</span>
+              <span>{syncStatus.processed?.toLocaleString() ?? 0}{syncStatus.total ? ` / ~${syncStatus.total.toLocaleString()}` : ""}</span>
+            </div>
+            <div className="h-2 rounded-full bg-black/40 overflow-hidden">
+              <div
+                className="h-full bg-primary transition-all duration-500"
+                style={{
+                  width: syncStatus.total ? `${Math.min(100, (syncStatus.processed / syncStatus.total) * 100)}%` : "30%",
+                }}
+              />
+            </div>
+          </div>
+        )}
+
+        {lastResult && !syncing && (
           <div className="mt-4 text-sm text-muted-foreground border-t border-white/8 pt-4">
             {lastResult.success ? (
               <p>Imported: <span className="text-white">{lastResult.imported ?? 0}</span> · Updated: <span className="text-white">{lastResult.updated ?? 0}</span> · Skipped: <span className="text-white">{lastResult.skipped ?? 0}</span></p>
