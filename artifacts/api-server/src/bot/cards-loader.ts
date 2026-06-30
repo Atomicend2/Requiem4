@@ -243,21 +243,22 @@ async function loadCardsFromRepoInner(opts: { force?: boolean } = {}): Promise<{
    * does nothing to clean up ones that already exist, since updateOne only
    * ever touches the first match. This pass finds and merges them down to
    * one document each, going forward. ── */
-  try {
-    const dupGroups = await col("cards").aggregate([
-      { $match: { shoob_id: { $ne: null } } },
-      { $group: { _id: "$shoob_id", ids: { $push: "$_id" }, count: { $sum: 1 } } },
-      { $match: { count: { $gt: 1 } } },
-    ]).toArray().catch(() => [] as any[]);
+  if (opts.force) {
+    try {
+      const dupGroups = await col("cards").aggregate([
+        { $match: { shoob_id: { $ne: null } } },
+        { $group: { _id: "$shoob_id", ids: { $push: "$_id" }, count: { $sum: 1 } } },
+        { $match: { count: { $gt: 1 } } },
+      ]).toArray().catch(() => [] as any[]);
 
-    const mazokuDupGroups = await col("cards").aggregate([
-      { $match: { mazoku_id: { $ne: null } } },
-      { $group: { _id: "$mazoku_id", ids: { $push: "$_id" }, count: { $sum: 1 } } },
-      { $match: { count: { $gt: 1 } } },
-    ]).toArray().catch(() => [] as any[]);
+      const mazokuDupGroups = await col("cards").aggregate([
+        { $match: { mazoku_id: { $ne: null } } },
+        { $group: { _id: "$mazoku_id", ids: { $push: "$_id" }, count: { $sum: 1 } } },
+        { $match: { count: { $gt: 1 } } },
+      ]).toArray().catch(() => [] as any[]);
 
-    const allDupGroups = [...dupGroups, ...mazokuDupGroups];
-    if (allDupGroups.length > 0) {
+      const allDupGroups = [...dupGroups, ...mazokuDupGroups];
+      if (allDupGroups.length > 0) {
       const allDupIds = allDupGroups.flatMap((g: any) => g.ids);
       const ownedIds = new Set(
         (await col("user_cards").find(
@@ -285,8 +286,9 @@ async function loadCardsFromRepoInner(opts: { force?: boolean } = {}): Promise<{
         );
       }
     }
-  } catch (e: any) {
-    logger.warn({ e: e.message }, "Pre-existing duplicate cleanup failed (non-fatal)");
+    } catch (e: any) {
+      logger.warn({ e: e.message }, "Pre-existing duplicate cleanup failed (non-fatal)");
+    }
   }
 
   /* Collect already-imported primary IDs (shoob_id OR mazoku_id) directly
@@ -305,28 +307,9 @@ async function loadCardsFromRepoInner(opts: { force?: boolean } = {}): Promise<{
     if (d.mazoku_id) importedIds.add(d.mazoku_id);
   }
 
-  /* Skip sync if DB already has at least as many docs as the file */
-  const existingCount = await col("cards").countDocuments().catch(() => 0);
-  if (existingCount > 0 && importedIds.size > 0) {
-    // We'll still run to catch new additions, but only skip if sizes match
-  }
-
   const stream = isJsonl ? streamJsonl(filePath) : streamCardsJson(filePath);
 
-  // NOTE: true duplicate elimination (same shoob_id, same mazoku_id, or same
-  // name+series+tier+file_hash content) already happens once, upstream, in
-  // merge_cards.js when unified_cards.jsonl is generated. There used to be a
-  // second, redundant dedup pass here that skipped any incoming card whose
-  // image_url already existed in the database — but that ran BEFORE the
-  // upsert logic below, so it intercepted every already-imported card before
-  // it could ever be matched against the upsert-by-id path and have its
-  // fields refreshed. In practice this meant every existing card was always
-  // counted as "skipped" and never "updated", no matter what changed in the
-  // source file (tier fixes, event tags, etc. never propagated to cards that
-  // were already in Mongo). Removed — the upsert keyed on shoob_id/mazoku_id
-  // below is the single source of truth for "is this card new or existing",
-  // and it's what actually updates a changed card's fields.
-  const BATCH = 50;
+  const BATCH = 500;
   let batch: any[] = [];
 
   const processBatch = async () => {
@@ -379,30 +362,6 @@ async function loadCardsFromRepoInner(opts: { force?: boolean } = {}): Promise<{
       if (cardOps.length) await col("cards").bulkWrite(cardOps, { ordered: false });
     } catch (e: any) { logger.warn({ e: e.message }, "Card bulk write partial error"); }
 
-    // Best-effort mirror into the legacy tracking collections, for other
-    // tools (the scraper, manual sync routes) that still query them. This is
-    // NOT relied on for dedup correctness — that's enforced by the upsert
-    // above keyed directly on shoob_id/mazoku_id in `cards`. If this write
-    // fails or is skipped by a crash, nothing breaks; it only affects
-    // anything reading these collections directly for stats/lookups.
-    try {
-      const trackingOps: any[] = [];
-      for (const op of cardOps) {
-        const doc = op.insertOne?.document || op.updateOne?.update?.$set;
-        if (!doc) continue;
-        if (doc.shoob_id) {
-          trackingOps.push({
-            updateOne: {
-              filter: { shoob_id: doc.shoob_id },
-              update: { $setOnInsert: { shoob_id: doc.shoob_id } },
-              upsert: true,
-            },
-          });
-        }
-      }
-      if (trackingOps.length) await col("shoob_imported_ids").bulkWrite(trackingOps, { ordered: false });
-    } catch (e: any) { logger.warn({ e: e.message }, "Legacy tracking collection mirror failed (non-fatal)"); }
-
     batch = [];
   };
 
@@ -414,62 +373,6 @@ async function loadCardsFromRepoInner(opts: { force?: boolean } = {}): Promise<{
     if (batch.length >= BATCH) await processBatch();
   }
   if (batch.length > 0) await processBatch();
-
-  // ── Reconciliation: remove any card in Mongo whose shoob_id/mazoku_id no
-  // longer appears in the current source file. Without this, cards imported
-  // under an older export (before an ID changed, or before a dedup pass on
-  // the file itself) stick around forever as orphaned duplicates — the file
-  // and the database silently drift apart over repeated syncs. We only run
-  // this when the sync actually read a non-trivial number of cards, so a
-  // truncated/failed read of the file can't wipe out the whole collection.
-  if (isJsonl && totalSeen > 0) {
-    try {
-      const currentIdsStream = streamJsonl(filePath);
-      const currentIds = new Set<string>();
-      for await (const raw of currentIdsStream) {
-        const pid = String(raw.shoob_id || raw.mazoku_id || raw.id || "").trim();
-        if (pid) currentIds.add(pid);
-      }
-
-      if (currentIds.size > 0) {
-        const allCardIds = await col("cards").find({}, { projection: { _id: 1, shoob_id: 1, mazoku_id: 1 } }).toArray();
-        const staleMongoIds: any[] = [];
-        const staleShoobIds: string[] = [];
-        const staleMazokuIds: string[] = [];
-        for (const doc of allCardIds) {
-          const pid = String(doc.shoob_id || doc.mazoku_id || "").trim();
-          if (pid && !currentIds.has(pid)) {
-            staleMongoIds.push(doc._id);
-            if (doc.shoob_id)  staleShoobIds.push(doc.shoob_id);
-            if (doc.mazoku_id) staleMazokuIds.push(doc.mazoku_id);
-          }
-        }
-        if (staleMongoIds.length > 0) {
-          // Don't delete cards that players already own — unequip them from
-          // circulation (no longer spawnable/orphaned-safe) but never destroy
-          // a card that's sitting in someone's collection.
-          const ownedCardIds = new Set(
-            (await col("user_cards").find(
-              { card_id: { $in: staleMongoIds } },
-              { projection: { card_id: 1 } }
-            ).toArray()).map((d: any) => d.card_id)
-          );
-          const safeToDelete = staleMongoIds.filter((id) => !ownedCardIds.has(id));
-          if (safeToDelete.length > 0) {
-            await col("cards").deleteMany({ _id: { $in: safeToDelete } });
-          }
-          if (staleShoobIds.length)  await col("shoob_imported_ids").deleteMany({ shoob_id: { $in: staleShoobIds } });
-          if (staleMazokuIds.length) await col("mazoku_imported_ids").deleteMany({ mazoku_id: { $in: staleMazokuIds } });
-          logger.info(
-            { staleFound: staleMongoIds.length, deleted: safeToDelete.length, keptOwned: staleMongoIds.length - safeToDelete.length },
-            "Card reconciliation: removed orphaned cards not present in current source file"
-          );
-        }
-      }
-    } catch (e: any) {
-      logger.warn({ e: e.message }, "Card reconciliation step failed (non-fatal)");
-    }
-  }
 
   // Persist metadata for fast-skip on future cold starts
   await col("sync_meta").updateOne(
